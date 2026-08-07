@@ -1,0 +1,188 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  USER
+  PREMIUM_USER
+}
+
+model User {
+  id       String    @id @default(cuid()) @map("_id")
+  name     String?
+  email    String    @unique
+  image    String?
+  accounts Account[]
+  role     UserRole  @default(USER)
+
+  myPlayground StarMark[]
+
+  chatMessages ChatMessage[] // New relation for chat messages
+  playgroundMemberships PlaygroundMember[]
+
+  starredPlaygrounds Playground[]
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid()) @map("_id")
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String
+  refreshToken      String? @map("refresh_token")
+  accessToken       String? @map("access_token")
+  expiresAt         Int?    @map("expires_at")
+  tokenType         String? @map("token_type")
+  scope             String?
+  idToken           String? @map("id_token")
+  sessionState      String? @map("session_state")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+enum Templates {
+  REACT
+  NEXTJS
+  EXPRESS
+  VUE
+  HONO
+  ANGULAR
+}
+
+enum PlaygroundMemberRole {
+  EDITOR
+  VIEWER
+}
+
+model Playground {
+  id            String         @id @default(cuid()) @map("_id")
+  title         String
+  description   String?
+  template      Templates      @default(REACT)
+  templateFiles TemplateFile[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  Starmark      StarMark[]
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatMessages  ChatMessage[]
+  members       PlaygroundMember[]
+  collaborationDocuments CollaborationDocument[]
+  snapshots     PlaygroundSnapshot[]
+  historyEvents PlaygroundHistoryEvent[]
+  collaborationRevision Int @default(1)
+
+  @@index([userId, updatedAt])
+}
+
+model PlaygroundSnapshot {
+  id              String     @id @default(cuid()) @map("_id")
+  playgroundId    String
+  playground      Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  name            String
+  kind            String
+  content         Json
+  templateVersion Int
+  createdById     String
+  createdByName   String
+  createdAt       DateTime   @default(now())
+
+  @@index([playgroundId, createdAt])
+}
+
+model PlaygroundHistoryEvent {
+  id            String     @id @default(cuid()) @map("_id")
+  playgroundId  String
+  playground    Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  type          String
+  actorId       String
+  actorName     String
+  snapshotId    String?
+  snapshotName  String?
+  createdAt     DateTime   @default(now())
+
+  @@index([playgroundId, createdAt])
+}
+
+model CollaborationDocument {
+  id           String     @id @default(cuid()) @map("_id")
+  room         String     @unique
+  filePath     String
+  state        String
+  playgroundId String
+  playground   Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([playgroundId, updatedAt])
+}
+
+model PlaygroundMember {
+  id           String               @id @default(cuid()) @map("_id")
+  playgroundId String
+  userId       String
+  role         PlaygroundMemberRole
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  playground   Playground           @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([playgroundId, userId])
+  @@index([userId, updatedAt])
+}
+
+model StarMark {
+  id           String     @id @default(cuid()) @map("_id")
+  userId       String
+  playgroundId String
+  isMarked     Boolean
+  createdAt    DateTime   @default(now())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  playground   Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, playgroundId])
+}
+
+model TemplateFile {
+  id           String     @id @default(cuid()) @map("_id")
+  content      Json
+  version      Int        @default(1)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  playgroundId String     @unique
+  playground   Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+}
+
+// New model for AI chat messages
+model ChatMessage {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  role      String // "user" or "assistant"
+  content   String
+  playgroundId String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  playground Playground? @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([playgroundId, createdAt])
+}
