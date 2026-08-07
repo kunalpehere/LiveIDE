@@ -8,31 +8,6 @@ LiveIDE is a collaborative browser-based development workspace for creating, run
 
 > The looping preview cycles through the landing page, project dashboard, editor startup, and running preview states so the README behaves like a lightweight screenshot carousel.
 
-### Full-resolution screenshots
-
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <strong>Landing page</strong><br /><br />
-      <img src="docs/images/liveide-landing.png" alt="LiveIDE landing page" />
-    </td>
-    <td width="50%" align="center">
-      <strong>Project dashboard</strong><br /><br />
-      <img src="docs/images/liveide-projects.png" alt="LiveIDE project dashboard" />
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <strong>Runtime startup</strong><br /><br />
-      <img src="docs/images/liveide-editor.png" alt="LiveIDE browser runtime starting" />
-    </td>
-    <td width="50%" align="center">
-      <strong>Live preview and terminal</strong><br /><br />
-      <img src="docs/images/liveide-editor-running.png" alt="LiveIDE editor with a running preview and terminal" />
-    </td>
-  </tr>
-</table>
-
 ## Core capabilities
 
 - Multi-file editing with Monaco Editor
