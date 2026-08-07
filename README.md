@@ -2,19 +2,37 @@
 
 LiveIDE is a collaborative browser-based development workspace for creating, running, previewing, and sharing web projects. It combines a Monaco editor, WebContainer runtime, real-time CRDT collaboration, project history, role-based access, and optional AI assistance in one application.
 
-## Output
+## Product preview
 
-### Landing page
+<details>
+<summary><strong>View application screenshots</strong></summary>
 
-![LiveIDE landing page](docs/images/liveide-landing.png)
+<br />
 
-### Project dashboard
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Landing page</strong><br /><br />
+      <img src="docs/images/liveide-landing.png" alt="LiveIDE landing page" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Project dashboard</strong><br /><br />
+      <img src="docs/images/liveide-projects.png" alt="LiveIDE project dashboard" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Runtime startup</strong><br /><br />
+      <img src="docs/images/liveide-editor.png" alt="LiveIDE browser runtime starting" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Live preview and terminal</strong><br /><br />
+      <img src="docs/images/liveide-editor-running.png" alt="LiveIDE editor with a running preview and terminal" />
+    </td>
+  </tr>
+</table>
 
-![LiveIDE project dashboard](docs/images/liveide-projects.png)
-
-### Browser IDE
-
-![LiveIDE editor with preview and terminal](docs/images/liveide-editor.png)
+</details>
 
 ## Core capabilities
 
