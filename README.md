@@ -4,10 +4,11 @@ LiveIDE is a collaborative browser-based development workspace for creating, run
 
 ## Product preview
 
-<details>
-<summary><strong>View application screenshots</strong></summary>
+![LiveIDE showcase](docs/images/liveide-showcase.gif)
 
-<br />
+> The looping preview cycles through the landing page, project dashboard, editor startup, and running preview states so the README behaves like a lightweight screenshot carousel.
+
+### Full-resolution screenshots
 
 <table>
   <tr>
@@ -31,8 +32,6 @@ LiveIDE is a collaborative browser-based development workspace for creating, run
     </td>
   </tr>
 </table>
-
-</details>
 
 ## Core capabilities
 
