@@ -1,0 +1,57 @@
+import { expect, test } from "@playwright/test";
+import { encode } from "next-auth/jwt";
+
+test("shared runtime presence survives panel changes, resets controls offline and enforces viewers", async ({ page, browser }, info) => {
+  test.skip(info.project.name !== "collaboration-chromium", "Requires authenticated collaboration service");
+  test.setTimeout(180_000);
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.stack ?? error.message));
+  await page.addInitScript(() => Object.defineProperty(globalThis, "crossOriginIsolated", { value: false }));
+  await page.goto("/auth/sign-in"); await page.getByRole("button", { name: "Continue as guest" }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.goto("/playground/mock-playground-1");
+  await expect(page).toHaveURL(/\/playground\/mock-playground-1$/);
+  await expect(page.getByRole("button", { name: "Share", exact: true })).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Share", exact: true }).click();
+  await page.getByRole("textbox", { name: "Collaborator email" }).fill("collaborator@example.com");
+  await page.getByRole("button", { name: "Add member", exact: true }).click();
+  await expect(page.getByText("Project Collaborator", { exact: true })).toBeVisible(); await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Shared runtime", exact: true }).click();
+  await expect(page.getByText("Runtime sharing: connected", { exact: true })).toBeVisible();
+  const controls = page.getByRole("checkbox", { name: "Allow editors to control my runtime" });
+  await expect(controls).not.toBeChecked(); await controls.check();
+  const context = await browser.newContext();
+  await context.addInitScript(() => Object.defineProperty(globalThis, "crossOriginIsolated", { value: false }));
+  const name = "authjs.session-token";
+  const value = await encode({ secret: "playwright-local-only-secret", salt: name, token: { sub: "mock-user-2", name: "Project Collaborator", email: "collaborator@example.com", role: "USER" } });
+  await context.addCookies([{ name, value, domain: "localhost", path: "/", httpOnly: true, sameSite: "Lax" }]);
+  const peer = await context.newPage(); peer.on("pageerror", error => errors.push(error.stack ?? error.message));
+  try {
+    await peer.goto(page.url()); await peer.getByRole("button", { name: "Shared runtime", exact: true }).click();
+    await expect(peer.getByText("Runtime sharing: connected", { exact: true })).toBeVisible();
+    await expect(peer.getByText("Runtime sharing disconnected. Remote controls are disabled.", { exact: true })).toHaveCount(0);
+    await expect(peer.getByText("Remote controls enabled by host", { exact: true })).toBeVisible();
+    await expect(peer.getByText("Process: unsupported · Preview: not ready", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Notes", exact: true }).click();
+    await expect(page.getByRole("complementary", { name: "Shared runtimes", exact: true })).toHaveCount(0);
+    await expect(page.getByText("Notes: connected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Project notes", exact: true }).locator(".monaco-editor")).toBeVisible();
+    await expect(peer.getByText("Remote controls enabled by host", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Shared runtime", exact: true }).click();
+    await page.context().setOffline(true); await expect(page.getByText("Runtime sharing: offline", { exact: true })).toBeVisible();
+    await page.context().setOffline(false); await expect(page.getByText("Runtime sharing: connected", { exact: true })).toBeVisible();
+    await expect(controls).not.toBeChecked(); await expect(peer.getByText("Remote controls disabled", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close shared runtimes", exact: true }).click();
+    await page.getByRole("button", { name: "Share", exact: true }).click();
+    await page.getByRole("combobox", { name: "Role for collaborator@example.com", exact: true }).click();
+    await page.getByRole("option", { name: "Viewer", exact: true }).click(); await page.keyboard.press("Escape");
+    await expect(peer.getByText("Runtime sharing: failed", { exact: true })).toBeVisible();
+    await peer.reload(); await peer.getByRole("button", { name: "Shared runtime", exact: true }).click();
+    await expect(peer.getByText("Runtime sharing: connected", { exact: true })).toBeVisible();
+    await expect(peer.getByRole("checkbox", { name: "Allow editors to control my runtime" })).toHaveCount(0);
+    await expect(peer.getByRole("button", { name: /Request (start|stop|restart)/ })).toHaveCount(0);
+    await expect(peer.getByRole("button", { name: "Run", exact: true })).toBeDisabled();
+    expect((await peer.request.post("/api/collaboration/runtime-control", { data: { action: "request", playgroundId: "mock-playground-1", targetUserId: "mock-user-1", targetClientId: 1, targetNonce: "a0472283-f0b9-42f3-9126-13885873facf", revision: 1, operation: "stop" } })).status()).toBe(403);
+    await info.attach("shared-runtime-viewer", { body: await peer.screenshot(), contentType: "image/png" });
+    expect(errors).toEqual([]);
+  } finally { await page.context().setOffline(false); await context.close(); }
+});

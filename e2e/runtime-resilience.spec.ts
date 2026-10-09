@@ -1,0 +1,52 @@
+import { expect, test } from "@playwright/test";
+import type * as Monaco from "monaco-editor";
+import { mkdir, writeFile } from "node:fs/promises";
+
+test("real terminal flood, preview reload and failures preserve editor drafts", async ({ page }, testInfo) => {
+  test.skip(process.env.LIVEIDE_RUNTIME_RESILIENCE !== "1", "Opt-in real WebContainer runtime check");
+  test.setTimeout(420_000);
+  await page.goto("/auth/sign-in");
+  await page.getByRole("button",{name:"Continue as guest"}).click();
+  await page.getByRole("link",{name:"React TypeScript Starter"}).first().click();
+  await page.getByRole("button",{name:"App.tsx",exact:true}).click();
+  await expect(page.locator('iframe[title="WebContainer Preview"]')).toBeVisible({timeout:240_000});
+  const browserErrors: string[] = [];
+  page.on("pageerror", error => browserErrors.push(error.message));
+  const original = await page.evaluateHandle(async () => {
+    const browser=window as unknown as {require:(modules:string[],callback:(monaco:typeof Monaco)=>void)=>void};
+    const monaco=await new Promise<typeof Monaco>(resolve=>browser.require(["vs/editor/editor.main"],resolve));
+    const editor=monaco.editor.getEditors()[0];const model=editor.getModel()!;const text=model.getValue();
+    return {monaco,editor,model,text};
+  });
+  const terminal=page.locator('.xterm-helper-textarea');
+  await terminal.focus();
+  await page.keyboard.insertText("node -e global.i=0;global.t=setInterval(()=>{process.stdout.write(Array.from({length:500},()=>'day15-'+global.i++).join(String.fromCharCode(10))+String.fromCharCode(10));if(global.i>=50000){clearInterval(global.t);process.stdout.write('day15-complete-50000'+String.fromCharCode(10))}},25)");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Running command",{exact:true})).toBeVisible();
+  const started=Date.now();
+  await original.evaluate(({editor,model,text})=>editor.executeEdits("day15-draft",[{range:model.getFullModelRange(),text:text+"\n// day15 unsaved draft",forceMoveMarkers:true}]));
+  await expect(page.getByText("1 file(s) open • Unsaved changes",{exact:true})).toBeVisible({timeout:5_000});
+  const editLatencyMs=Date.now()-started;
+  await expect(page.getByText("Running command",{exact:true})).toBeVisible();
+  await expect(page.getByText("Ready",{exact:true})).toBeVisible({timeout:60_000});
+  await expect(page.locator('.xterm-rows')).toContainText("Process exited with code 0",{timeout:30_000});
+  await expect(page.locator('.xterm-rows')).toContainText("day15-complete-50000");
+  const frame=await page.locator('iframe[title="WebContainer Preview"]').elementHandle();
+  await page.getByRole("button",{name:"Reload preview",exact:true}).click();
+  expect(await frame!.evaluate(element=>element.isConnected)).toBe(false);
+  await expect(page.getByRole("link",{name:"Open preview in new tab"})).toHaveAttribute("target","_blank");
+  await page.locator('iframe[title="WebContainer Preview"]').dispatchEvent("error");
+  await expect(page.getByText("Preview could not load",{exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Reload preview",exact:true}).click();
+  // Exercise nonzero command exit independently of the development server.
+  await terminal.focus();await page.keyboard.insertText("node -e process.exit(7)");await page.keyboard.press("Enter");
+  await expect(page.locator('.xterm-rows')).toContainText("Process exited with code 7",{timeout:20_000});
+  await page.getByRole("button",{name:"Stop runtime",exact:true}).click();
+  await expect(page.getByText("Runtime stopped",{exact:true})).toBeVisible();
+  expect(await original.evaluate(({monaco,editor,model})=>monaco.editor.getEditors().includes(editor)&&editor.getModel()===model&&model.getValue().includes("day15 unsaved draft"))).toBe(true);
+  await original.evaluate(({editor,model,text})=>{editor.executeEdits("day15-restore",[{range:model.getFullModelRange(),text,forceMoveMarkers:true}]);});
+  expect(browserErrors).toEqual([]);
+  const measurements=JSON.stringify({lines:50000,editLatencyMs,previewReload:true,previewFailureRecovery:true,nonzeroExit:7,monacoPreserved:true},null,2);
+  await testInfo.attach("runtime-resilience",{body:measurements,contentType:"application/json"});
+  await mkdir("reports",{recursive:true});await writeFile("reports/runtime-resilience.json",measurements);
+});

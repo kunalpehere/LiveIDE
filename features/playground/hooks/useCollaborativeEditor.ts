@@ -1,103 +1,145 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import type { editor } from "monaco-editor";
 import * as Y from "yjs";
 import { MonacoBinding } from "y-monaco";
-import { WebsocketProvider } from "y-websocket";
+import { PROTOCOL_VERSION, parseTokenResponse, errorResponseSchema, CollaborationProtocolError } from "@/lib/collaboration-protocol.mjs";
+import { CollaborationSession, type CollaborationStatus } from "@/lib/collaboration-session";
+import { createPresenceEditor } from "@/features/playground/lib/presence-editor";
+import { useFileExplorer } from "./useFileExplorer";
 
-type CollaborationStatus = "disabled" | "connecting" | "connected" | "disconnected" | "error";
+type OpenSession = {
+  session: CollaborationSession;
+  status: CollaborationStatus;
+  error: string | null;
+  presence: Record<string, unknown> | null;
+  dispose: () => void;
+};
 
-interface TokenResponse {
-  success: true;
-  data: {
-    websocketUrl: string;
-    token: string;
-    room: string;
-    user: { id: string; name: string; color: string };
-  };
+// Awareness is an imperative lifecycle resource, kept outside React state.
+function setSessionVisibility(entry: OpenSession, visible: boolean) {
+  if (visible && entry.presence) {
+    const presence = entry.presence;
+    entry.presence = null;
+    entry.session.awareness.setLocalState(presence);
+  } else if (!visible && entry.session.awareness.getLocalState()) {
+    entry.presence = entry.session.awareness.getLocalState();
+    entry.session.awareness.setLocalState(null);
+  }
 }
 
-export function useCollaborativeEditor({
-  enabled,
-  playgroundId,
-  filePath,
-  initialContent,
-  editorInstance,
-}: {
-  enabled: boolean;
-  playgroundId?: string;
-  filePath?: string;
-  initialContent: string;
+/** Keep open-file transports/bindings alive while navigating. Closing a socket
+ * on every switch can drop an edit waiting for server-side authorization. */
+export function useCollaborativeEditor({ enabled, playgroundId, filePath, editorInstance }: {
+  enabled: boolean; playgroundId?: string; filePath?: string;
   editorInstance: editor.IStandaloneCodeEditor | null;
 }) {
-  const [status, setStatus] = useState<CollaborationStatus>(enabled ? "connecting" : "disabled");
+  const [status, setStatus] = useState<CollaborationStatus | "disabled">(enabled ? "connecting" : "disabled");
   const [participantCount, setParticipantCount] = useState(1);
-  const initialContentRef = useRef(initialContent);
-  initialContentRef.current = initialContent;
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const sessions = useRef(new Map<string, OpenSession>());
+  const activePath = useRef(filePath);
+  activePath.current = filePath;
+  const retry = useCallback(() => sessions.current.get(activePath.current || "")?.session.retry(), []);
+  const getDiagnostics = useCallback(() => sessions.current.get(activePath.current || "")?.session.applicationTiming.snapshot() ?? null, []);
+
+  useEffect(() => {
+    const entries = sessions.current;
+    const unsubscribe = useFileExplorer.subscribe(state => {
+      if (state.playgroundId !== playgroundId) return;
+      for (const [path, entry] of entries) {
+        if (!state.openFiles.some(file => file.id === path)) { entries.delete(path); entry.dispose(); }
+      }
+    });
+    return () => {
+      unsubscribe();
+      entries.forEach(entry => entry.dispose());
+      entries.clear();
+    };
+  }, [enabled, playgroundId, editorInstance]);
 
   useEffect(() => {
     if (!enabled || !playgroundId || !filePath || !editorInstance) {
-      setStatus("disabled");
-      setParticipantCount(1);
+      setStatus("disabled"); setParticipantCount(1); setErrorMessage(null);
       return;
     }
     const mountedEditor = editorInstance;
-
-    const controller = new AbortController();
-    let disposed = false;
-    let document: Y.Doc | undefined;
-    let provider: WebsocketProvider | undefined;
-    let binding: MonacoBinding | undefined;
-    setStatus("connecting");
-
-    async function connect() {
-      try {
-        const response = await fetch("/api/collaboration/token", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ playgroundId, filePath }),
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("Collaboration authorization failed");
-        const result = await response.json() as TokenResponse;
-        if (disposed) return;
-
-        document = new Y.Doc();
-        provider = new WebsocketProvider(result.data.websocketUrl, result.data.room, document, {
-          params: { token: result.data.token },
-        });
-        provider.awareness.setLocalStateField("user", result.data.user);
-        const updateParticipants = () => setParticipantCount(provider?.awareness.getStates().size || 1);
-        provider.awareness.on("change", updateParticipants);
-        provider.on("status", (event: { status: "connected" | "disconnected" | "connecting" }) =>
-          setStatus(event.status === "connected" ? "connected" : event.status));
-        provider.on("connection-error", () => setStatus("error"));
-        provider.on("sync", (synced: boolean) => {
-          if (!synced || disposed || !document || !provider || binding) return;
+    let entry = sessions.current.get(filePath);
+    if (!entry) {
+      const model = mountedEditor.getModel();
+      if (!model) return;
+      const document = new Y.Doc();
+      const presenceEditor = createPresenceEditor(mountedEditor);
+      let disposed = false;
+      let binding: MonacoBinding | undefined;
+      let modelListener: { dispose: () => void } | undefined;
+      const session = new CollaborationSession({
+        document, WebSocket, isOnline: () => navigator.onLine, networkEvents: window,
+        onState: (state, message) => {
+          if (disposed) return;
+          currentEntry.status = state; currentEntry.error = message;
+          if (activePath.current === filePath) { setStatus(state); setErrorMessage(message); }
+          else if (state === "connected") {
+            currentEntry.presence = { ...currentEntry.presence, ...session.awareness.getLocalState() };
+            session.awareness.setLocalState(null);
+          }
+        },
+        getToken: async signal => {
+          const response = await fetch("/api/collaboration/token", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, playgroundId, filePath }), signal,
+          });
+          const body: unknown = await response.json().catch(() => null);
+          if (!response.ok) {
+            const failure = errorResponseSchema.safeParse(body);
+            throw new CollaborationProtocolError(failure.success ? failure.data.error.code : response.status === 401 ? "UNAUTHORIZED" : response.status === 403 ? "FORBIDDEN" : "UNAVAILABLE");
+          }
+          const result = parseTokenResponse(body);
+          if (result.data.playgroundId !== playgroundId || result.data.filePath !== filePath) throw new CollaborationProtocolError("ROOM_MISMATCH");
+          return result.data;
+        },
+        onSynced: () => {
+          if (disposed || binding || model.isDisposed()) return;
           const sharedText = document.getText("content");
-          if (sharedText.length === 0 && initialContentRef.current) sharedText.insert(0, initialContentRef.current);
-          const model = mountedEditor.getModel();
-          if (!model) return;
-          binding = new MonacoBinding(sharedText, model, new Set([mountedEditor]), provider.awareness);
-          updateParticipants();
-        });
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          console.warn("Real-time collaboration unavailable", error);
-          setStatus("error");
-        }
-      }
+          // The server hydrates every room. Empty text may be a real deletion.
+          binding = new MonacoBinding(sharedText, model, new Set([presenceEditor.editor]), session.awareness);
+          const updateDraft = () => {
+            const state = useFileExplorer.getState();
+            if (state.playgroundId === playgroundId && state.openFiles.some(file => file.id === filePath)) state.updateFileContent(filePath, model.getValue());
+          };
+          // Inactive models also receive normal collaborative edits. Preserve
+          // their current text in the workspace instead of restoring stale props.
+          modelListener = model.onDidChangeContent(updateDraft);
+          updateDraft();
+          if (activePath.current !== filePath) {
+            currentEntry.presence = { ...currentEntry.presence, ...session.awareness.getLocalState() };
+            session.awareness.setLocalState(null);
+          }
+        },
+      });
+      const updateParticipants = () => {
+        if (!disposed && activePath.current === filePath) setParticipantCount(session.awareness.getStates().size || 1);
+      };
+      const currentEntry: OpenSession = {
+        session, status: "connecting", error: null, presence: null,
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          modelListener?.dispose(); binding?.destroy(); presenceEditor.dispose();
+          session.awareness.off("change", updateParticipants);
+          session.dispose(); document.destroy();
+        },
+      };
+      entry = currentEntry;
+      sessions.current.set(filePath, entry);
+      session.awareness.on("change", updateParticipants);
+      session.start();
     }
-
-    void connect();
-    return () => {
-      disposed = true;
-      controller.abort();
-      binding?.destroy();
-      provider?.awareness.setLocalState(null);
-      provider?.destroy();
-      document?.destroy();
-    };
+    for (const [path, candidate] of sessions.current) {
+      setSessionVisibility(candidate, path === filePath);
+    }
+    setStatus(entry.status); setErrorMessage(entry.error);
+    setParticipantCount(entry.session.awareness.getStates().size || 1);
   }, [editorInstance, enabled, filePath, playgroundId]);
 
-  return { status, participantCount };
+  return { status, participantCount, errorMessage, retry, getDiagnostics };
 }

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const historyMessage = z.object({
   role: z.enum(["user", "assistant"]),
-  content: z.string().trim().min(1).max(4_000),
+  content: z.string().trim().min(1).max(4_000, "Chat context message exceeds 4,000 characters. Send a shorter excerpt."),
 });
 
 export const chatRequestSchema = z.union([
@@ -18,8 +18,8 @@ export const chatRequestSchema = z.union([
   z.object({
     action: z.literal("chat").default("chat"),
     playgroundId: z.string().min(1).max(128).optional(),
-    message: z.string().trim().min(1).max(12_000),
-    history: z.array(historyMessage).max(10).default([]),
+    message: z.string().trim().min(1).max(12_000, "Chat question exceeds 12,000 characters. Shorten it or ask in smaller sections."),
+    history: z.array(historyMessage).max(10, "Chat context exceeds 10 messages. Send fewer recent messages.").default([]),
     stream: z.boolean().default(false),
     mode: z.enum(["chat", "review", "fix", "optimize", "optimization"]).optional(),
   }),

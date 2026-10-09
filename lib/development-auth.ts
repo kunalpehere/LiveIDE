@@ -4,7 +4,7 @@ interface AuthEnvironment {
 }
 
 export function isGuestSignInEnabled(environment: AuthEnvironment = process.env) {
-  return environment.NODE_ENV !== "production" && environment.ENABLE_MOCK_DB === "true";
+  return environment.NODE_ENV === "development" && environment.ENABLE_MOCK_DB === "true";
 }
 
 export const guestUser = {

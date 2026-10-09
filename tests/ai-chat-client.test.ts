@@ -13,6 +13,21 @@ const payload = {
 };
 
 describe("AI chat client", () => {
+  it("keeps recent context within the request byte budget without mutating history", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ response: "Answer", model: "test" }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const history = Array.from({ length: 10 }, (_, i) => ({ role: "assistant" as const, content: String(i) + "é".repeat(3_999) }));
+    await requestChat({ ...payload, history });
+    const body = String(fetchMock.mock.calls[0][1].body);
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(32_000);
+    expect(JSON.parse(body).history.at(-1).content).toBe(history[9].content);
+    expect(history).toHaveLength(10);
+  });
+  it("explains excessive input before sending a request", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    await expect(requestChat({ ...payload, message: "é".repeat(20_000) })).rejects.toThrow(/Shorten/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it("parses JSON chat responses", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       response: "Answer", model: "test-model",

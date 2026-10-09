@@ -93,10 +93,11 @@ export const getPlaygroundById = async (playgroundId: string) => {
       title: true,
       description: true,
       template: true,
+      githubSource: true,
       templateFiles: { select: { content: true, version: true } },
     },
   });
-  return playground ? { ...playground, accessRole: role } : null;
+  return playground ? { ...playground, githubImported: !!playground.githubSource, accessRole: role } : null;
 };
 
 export const SaveUpdatedCode = async (
@@ -137,8 +138,12 @@ export const SaveUpdatedCode = async (
 export const deleteProjectById = async (playgroundId: string) => {
  return runPlaygroundAction("deleteProject", async () => {
   const id = playgroundIdSchema.parse(playgroundId);
-  await requirePlaygroundOwner(id);
-  await db.playground.delete({ where: { id } });
+  const { user } = await requirePlaygroundOwner(id);
+  await db.$transaction(async tx => {
+    const available = await tx.playground.updateMany({ where: { id, userId: user.id, OR: [{ githubCommitLock: null }, { githubCommitLock: { isSet: false } }] }, data: { githubCommitLock: "deleting" } });
+    if (available.count !== 1) throw new AppError("PENDING_COMMIT", "Recover or abandon the pending GitHub commit before deleting this project.", 409);
+    await tx.playground.delete({ where: { id } });
+  });
   revalidatePath("/dashboard");
   return { id };
  });
@@ -169,6 +174,8 @@ export const duplicateProjectById = async (playgroundId: string) => {
   if (!original) {
     throw new Error("Playground not found");
   }
+
+  for (const file of original.templateFiles) parseTemplateData(file.content);
 
   const duplicate = await db.playground.create({
     data: {

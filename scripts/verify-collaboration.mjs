@@ -2,14 +2,16 @@ import { SignJWT } from "jose";
 import WebSocket from "ws";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
+import { PROTOCOL_VERSION, collaborationRoom } from "../lib/collaboration-protocol.mjs";
+import { createProtocolWebSocket } from "../lib/collaboration-websocket.mjs";
 
 const secret = process.env.COLLABORATION_SECRET || "stage-11-2-verification-secret";
 const serverUrl = process.env.COLLABORATION_TEST_URL || "ws://127.0.0.1:1235";
-const room = `verification-${Date.now()}`;
+const room = collaborationRoom("verification", "verification.txt", 1);
 const key = new TextEncoder().encode(secret);
 
 async function token(userId) {
-  return new SignJWT({ scope: "collaboration:write", playgroundId: "verification", room, filePath: "verification.txt", revision: 1, userId })
+  return new SignJWT({ protocolVersion: PROTOCOL_VERSION, role: "EDITOR", scope: "collaboration:write", playgroundId: "verification", room, filePath: "verification.txt", revision: 1, userId, name: "Verification", color: "#3b82f6" })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("2m")
@@ -18,7 +20,7 @@ async function token(userId) {
 
 const docs = [new Y.Doc(), new Y.Doc()];
 const providers = await Promise.all(docs.map(async (doc, index) => new WebsocketProvider(serverUrl, room, doc, {
-  WebSocketPolyfill: WebSocket,
+  WebSocketPolyfill: createProtocolWebSocket(WebSocket),
   disableBc: true,
   params: { token: await token(`user-${index + 1}`) },
 })));

@@ -30,6 +30,7 @@ import {
   Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { RESOURCE_LIMITS } from "@/lib/resource-limits";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -283,6 +284,9 @@ export const AIChatSidePanel: React.FC<AIChatSidePanelProps> = ({
   theme = "dark",
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  useEffect(() => {
+    if (messages.length > RESOURCE_LIMITS.chatMessages) setMessages(messages.slice(-RESOURCE_LIMITS.chatMessages));
+  }, [messages]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -737,7 +741,7 @@ export const AIChatSidePanel: React.FC<AIChatSidePanelProps> = ({
           playgroundId,
           history: messages.slice(-10).map((msg) => ({
             role: msg.role,
-            content: msg.content,
+            content: msg.content.slice(-4_000),
           })),
           stream: streamResponse,
           mode: chatMode,
@@ -762,7 +766,7 @@ export const AIChatSidePanel: React.FC<AIChatSidePanelProps> = ({
         {
           role: "assistant",
           content:
-            "I'm having trouble connecting right now. Please check your internet connection and try again.",
+            error instanceof Error ? error.message : "Chat request failed. Please retry.",
           timestamp: new Date(),
           id: Date.now().toString(),
         },
@@ -887,7 +891,7 @@ export const AIChatSidePanel: React.FC<AIChatSidePanelProps> = ({
                     {activeFileName
                       ? `Working on ${activeFileName}`
                       : "No active file"}{" "}
-                    • {messages.length} messages
+                    • {messages.length} messages • Latest 100 retained per user and project
                   </p>
                 </div>
               </div>
@@ -957,6 +961,7 @@ export const AIChatSidePanel: React.FC<AIChatSidePanelProps> = ({
                   variant="ghost"
                   size="sm"
                   onClick={onClose}
+                  aria-label="Close chat"
                   className="h-8 w-8 p-0 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
                 >
                   <X className="h-4 w-4" />

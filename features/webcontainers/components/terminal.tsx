@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle, useMemo } from "react";
+import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { SpawnOptions, WebContainer, WebContainerProcess } from "@webcontainer/api";
 import { FitAddon } from "@xterm/addon-fit";
@@ -9,511 +9,187 @@ import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Search, Copy, Trash2, Download } from "lucide-react";
+import { Search, Copy, Trash2, Download, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { waitForOperation } from "../service/runtime-operation";
+import { consumeProcessOutput } from "../service/process-output";
+import { TerminalOutputQueue, TERMINAL_SCROLLBACK, TERMINAL_HISTORY_LIMIT, TERMINAL_INPUT_LIMIT } from "../service/terminal-output";
 
 interface TerminalProps {
   webcontainerUrl?: string;
   className?: string;
   theme?: "dark" | "light";
   webContainerInstance?: WebContainer | null;
+  runtimeReady?: boolean;
   spawnProcess?: (command: string, args?: string[], options?: SpawnOptions) => Promise<WebContainerProcess>;
 }
-
-// Define the methods that will be exposed through the ref
 export interface TerminalRef {
   writeToTerminal: (data: string) => void;
   clearTerminal: () => void;
   focusTerminal: () => void;
 }
+const themes = {
+  dark: { background: "#09090B", foreground: "#FAFAFA", cursor: "#FAFAFA" },
+  light: { background: "#FFFFFF", foreground: "#18181B", cursor: "#18181B" },
+};
 
-const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(({ 
-  webcontainerUrl, 
-  className,
-  theme = "dark",
-  webContainerInstance,
-  spawnProcess,
-}, ref) => {
-  const terminalRef = useRef<HTMLDivElement>(null);
+const TerminalComponent = forwardRef<TerminalRef, TerminalProps>((props, ref) => {
+  const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
-  const fitAddon = useRef<FitAddon | null>(null);
-  const searchAddon = useRef<SearchAddon | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
+  const queue = useRef<TerminalOutputQueue | null>(null);
+  const search = useRef<SearchAddon | null>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  const line = useRef("");
+  const history = useRef<string[]>([]);
+  const historyIndex = useRef(-1);
+  const command = useRef<{ controller: AbortController; process: WebContainerProcess | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [showSearch, setShowSearch] = useState(false);
-  
-  // Command line state
-  const currentLine = useRef<string>("");
-  const cursorPosition = useRef<number>(0);
-  const commandHistory = useRef<string[]>([]);
-  const historyIndex = useRef<number>(-1);
-  const currentProcess = useRef<WebContainerProcess | null>(null);
-  const shellProcess = useRef<WebContainerProcess | null>(null);
-
-  const terminalThemes = useMemo(() => ({
-    dark: {
-      background: "#09090B",
-      foreground: "#FAFAFA",
-      cursor: "#FAFAFA",
-      cursorAccent: "#09090B",
-      selection: "#27272A",
-      black: "#18181B",
-      red: "#EF4444",
-      green: "#22C55E",
-      yellow: "#EAB308",
-      blue: "#3B82F6",
-      magenta: "#A855F7",
-      cyan: "#06B6D4",
-      white: "#F4F4F5",
-      brightBlack: "#3F3F46",
-      brightRed: "#F87171",
-      brightGreen: "#4ADE80",
-      brightYellow: "#FDE047",
-      brightBlue: "#60A5FA",
-      brightMagenta: "#C084FC",
-      brightCyan: "#22D3EE",
-      brightWhite: "#FFFFFF",
-    },
-    light: {
-      background: "#FFFFFF",
-      foreground: "#18181B",
-      cursor: "#18181B",
-      cursorAccent: "#FFFFFF",
-      selection: "#E4E4E7",
-      black: "#18181B",
-      red: "#DC2626",
-      green: "#16A34A",
-      yellow: "#CA8A04",
-      blue: "#2563EB",
-      magenta: "#9333EA",
-      cyan: "#0891B2",
-      white: "#F4F4F5",
-      brightBlack: "#71717A",
-      brightRed: "#EF4444",
-      brightGreen: "#22C55E",
-      brightYellow: "#EAB308",
-      brightBlue: "#3B82F6",
-      brightMagenta: "#A855F7",
-      brightCyan: "#06B6D4",
-      brightWhite: "#FAFAFA",
-    },
-  }), []);
-
-  const writePrompt = useCallback(() => {
-    if (term.current) {
-      term.current.write("\r\n$ ");
-      currentLine.current = "";
-      cursorPosition.current = 0;
-    }
+  const [failure, setFailure] = useState(false);
+  const ready = Boolean(props.webContainerInstance && (props.runtimeReady ?? true));
+  const write = useCallback((text: string) => queue.current?.enqueue(text), []);
+  const prompt = useCallback(() => { line.current = ""; historyIndex.current = -1; write("\r\n$ "); }, [write]);
+  const stopCommand = useCallback(() => {
+    const active = command.current;
+    if (!active) return;
+    active.controller.abort(); active.process?.kill();
+    active.process = null;
   }, []);
-
-  // Expose methods through ref
-  useImperativeHandle(ref, () => ({
-    writeToTerminal: (data: string) => {
-      if (term.current) {
-        term.current.write(data);
-      }
-    },
-    clearTerminal: () => {
-      clearTerminal();
-    },
-    focusTerminal: () => {
-      if (term.current) {
-        term.current.focus();
-      }
-    },
-  }));
-
-  const executeCommand = useCallback(async (command: string) => {
-    if (!webContainerInstance || !term.current) return;
-
-    // Add to history
-    if (command.trim() && commandHistory.current[commandHistory.current.length - 1] !== command) {
-      commandHistory.current.push(command);
-    }
-    historyIndex.current = -1;
-
-    try {
-      // Handle built-in commands
-      if (command.trim() === "clear") {
-        term.current.clear();
-        writePrompt();
-        return;
-      }
-
-      if (command.trim() === "history") {
-        commandHistory.current.forEach((cmd, index) => {
-          term.current!.writeln(`  ${index + 1}  ${cmd}`);
-        });
-        writePrompt();
-        return;
-      }
-
-      if (command.trim() === "") {
-        writePrompt();
-        return;
-      }
-
-      // Parse command
-      const parts = command.trim().split(' ');
-      const cmd = parts[0];
-      const args = parts.slice(1);
-
-      // Execute in WebContainer
-      term.current.writeln("");
-      const process = await (spawnProcess
-        ? spawnProcess(cmd, args, {
-            terminal: { cols: term.current.cols, rows: term.current.rows },
-          })
-        : webContainerInstance.spawn(cmd, args, {
-        terminal: {
-          cols: term.current.cols,
-          rows: term.current.rows,
-        },
-      }));
-
-      currentProcess.current = process;
-
-      // Handle process output
-      process.output.pipeTo(new WritableStream({
-        write(data) {
-          if (term.current) {
-            term.current.write(data);
-          }
-        },
-      }));
-
-      // Wait for process to complete
-      const exitCode = await process.exit;
-      currentProcess.current = null;
-
-      // Show new prompt
-      writePrompt();
-
-    } catch (error) {
-      if (term.current) {
-        term.current.writeln(`\r\nCommand not found: ${command}`);
-        writePrompt();
-      }
-      currentProcess.current = null;
-    }
-  }, [webContainerInstance, spawnProcess, writePrompt]);
-
-  const handleTerminalInput = useCallback((data: string) => {
-    if (!term.current) return;
-
-    // Handle special characters
-    switch (data) {
-      case '\r': // Enter
-        executeCommand(currentLine.current);
-        break;
-        
-      case '\u007F': // Backspace
-        if (cursorPosition.current > 0) {
-          currentLine.current = 
-            currentLine.current.slice(0, cursorPosition.current - 1) + 
-            currentLine.current.slice(cursorPosition.current);
-          cursorPosition.current--;
-          
-          // Update terminal display
-          term.current.write('\b \b');
-        }
-        break;
-        
-      case '\u0003': // Ctrl+C
-        if (currentProcess.current) {
-          currentProcess.current.kill();
-          currentProcess.current = null;
-        }
-        term.current.writeln("^C");
-        writePrompt();
-        break;
-        
-      case '\u001b[A': // Up arrow
-        if (commandHistory.current.length > 0) {
-          if (historyIndex.current === -1) {
-            historyIndex.current = commandHistory.current.length - 1;
-          } else if (historyIndex.current > 0) {
-            historyIndex.current--;
-          }
-          
-          // Clear current line and write history command
-          const historyCommand = commandHistory.current[historyIndex.current];
-          term.current.write('\r$ ' + ' '.repeat(currentLine.current.length) + '\r$ ');
-          term.current.write(historyCommand);
-          currentLine.current = historyCommand;
-          cursorPosition.current = historyCommand.length;
-        }
-        break;
-        
-      case '\u001b[B': // Down arrow
-        if (historyIndex.current !== -1) {
-          if (historyIndex.current < commandHistory.current.length - 1) {
-            historyIndex.current++;
-            const historyCommand = commandHistory.current[historyIndex.current];
-            term.current.write('\r$ ' + ' '.repeat(currentLine.current.length) + '\r$ ');
-            term.current.write(historyCommand);
-            currentLine.current = historyCommand;
-            cursorPosition.current = historyCommand.length;
-          } else {
-            historyIndex.current = -1;
-            term.current.write('\r$ ' + ' '.repeat(currentLine.current.length) + '\r$ ');
-            currentLine.current = "";
-            cursorPosition.current = 0;
-          }
-        }
-        break;
-        
-      default:
-        // Regular character input
-        if (data >= ' ' || data === '\t') {
-          currentLine.current = 
-            currentLine.current.slice(0, cursorPosition.current) + 
-            data + 
-            currentLine.current.slice(cursorPosition.current);
-          cursorPosition.current++;
-          term.current.write(data);
-        }
-        break;
-    }
-  }, [executeCommand, writePrompt]);
-
-  const initializeTerminal = useCallback(() => {
-    if (!terminalRef.current || term.current) return;
-
-    const terminal = new Terminal({
-      cursorBlink: true,
-      fontFamily: '"Fira Code", "JetBrains Mono", "Consolas", monospace',
-      fontSize: 14,
-      lineHeight: 1.2,
-      letterSpacing: 0,
-      theme: terminalThemes[theme],
-      allowTransparency: false,
-      convertEol: true,
-      scrollback: 1000,
-      tabStopWidth: 4,
-    });
-
-    // Add addons
-    const fitAddonInstance = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
-    const searchAddonInstance = new SearchAddon();
-
-    terminal.loadAddon(fitAddonInstance);
-    terminal.loadAddon(webLinksAddon);
-    terminal.loadAddon(searchAddonInstance);
-
-    terminal.open(terminalRef.current);
-    
-    fitAddon.current = fitAddonInstance;
-    searchAddon.current = searchAddonInstance;
-    term.current = terminal;
-
-    // Handle terminal input
-    terminal.onData(handleTerminalInput);
-
-    // Initial fit
-    setTimeout(() => {
-      fitAddonInstance.fit();
-    }, 100);
-
-    // Welcome message
-    terminal.writeln("LiveIDE terminal");
-    terminal.writeln("Type 'help' for available commands");
-    writePrompt();
-
-    return terminal;
-  }, [theme, handleTerminalInput, writePrompt, terminalThemes]);
-
-  const connectToWebContainer = useCallback(async () => {
-    if (!webContainerInstance || !term.current) return;
-
-    try {
-      setIsConnected(true);
-      term.current.writeln("✅ Connected to WebContainer");
-      term.current.writeln("Ready to execute commands");
-      writePrompt();
-    } catch (error) {
-      setIsConnected(false);
-      term.current.writeln("❌ Failed to connect to WebContainer");
-      console.error("WebContainer connection error:", error);
-    }
-  }, [webContainerInstance, writePrompt]);
-
-  const clearTerminal = useCallback(() => {
-    if (term.current) {
-      term.current.clear();
-      term.current.writeln("LiveIDE terminal");
-      writePrompt();
-    }
-  }, [writePrompt]);
-
-  const copyTerminalContent = useCallback(async () => {
-    if (term.current) {
-      const content = term.current.getSelection();
-      if (content) {
-        try {
-          await navigator.clipboard.writeText(content);
-        } catch (error) {
-          console.error("Failed to copy to clipboard:", error);
-        }
-      }
-    }
-  }, []);
-
-  const downloadTerminalLog = useCallback(() => {
-    if (term.current) {
-      const buffer = term.current.buffer.active;
-      let content = "";
-      
-      for (let i = 0; i < buffer.length; i++) {
-        const line = buffer.getLine(i);
-        if (line) {
-          content += line.translateToString(true) + "\n";
-        }
-      }
-
-      const blob = new Blob([content], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `terminal-log-${new Date().toISOString().slice(0, 19)}.txt`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-  }, []);
-
-  const searchInTerminal = useCallback((term: string) => {
-    if (searchAddon.current && term) {
-      searchAddon.current.findNext(term);
-    }
-  }, []);
+  const clear = useCallback(() => {
+    line.current = ""; historyIndex.current = -1;
+    queue.current?.clear(() => term.current?.reset());
+    setTruncated(false); write("LiveIDE terminal\r\n");
+    if (!command.current) prompt();
+  }, [write, prompt]);
+  useImperativeHandle(ref, () => ({writeToTerminal: write, clearTerminal: clear, focusTerminal: () => term.current?.focus()}));
 
   useEffect(() => {
-    initializeTerminal();
-
-    // Handle resize
-    const resizeObserver = new ResizeObserver(() => {
-      if (fitAddon.current) {
-        setTimeout(() => {
-          fitAddon.current?.fit();
-        }, 100);
+    if (!host.current) return;
+    const terminal = new Terminal({cursorBlink: true, fontFamily: 'Consolas, monospace', fontSize: 14,
+      convertEol: true, scrollback: TERMINAL_SCROLLBACK, theme: themes.dark});
+    const fit = new FitAddon(); const finder = new SearchAddon();
+    terminal.loadAddon(fit); terminal.loadAddon(finder); terminal.loadAddon(new WebLinksAddon());
+    terminal.open(host.current); term.current = terminal; search.current = finder;
+    const output = new TerminalOutputQueue((data, parsed) => terminal.write(data, parsed), () => setTruncated(true), () => setFailure(true));
+    queue.current = output;
+    let disposed = false;
+    const execute = async () => {
+      if (command.current) return;
+      const text = line.current.trim(); line.current = "";
+      if (text && history.current.at(-1) !== text) {
+        history.current.push(text);
+        if (history.current.length > TERMINAL_HISTORY_LIMIT) history.current.shift();
       }
-    });
-
-    if (terminalRef.current) {
-      resizeObserver.observe(terminalRef.current);
-    }
-
-    return () => {
-      resizeObserver.disconnect();
-      if (currentProcess.current) {
-        currentProcess.current.kill();
-      }
-      if (shellProcess.current) {
-        // The latest process is intentionally read during cleanup.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        shellProcess.current.kill();
-      }
-      if (term.current) {
-        term.current.dispose();
-        term.current = null;
+      if (!text) { prompt(); return; }
+      if (text === "clear") { clear(); return; }
+      if (text === "help") { write("\r\nCommands: clear, history, help. Other commands run in the project runtime.\r\nCtrl+C stops a command.\r\n"); prompt(); return; }
+      if (text === "history") { write("\r\n" + history.current.map((item, index) => `${index + 1}  ${item}`).join("\r\n")); prompt(); return; }
+      const current = latest.current;
+      if (!current.webContainerInstance || current.runtimeReady === false) { write("\r\nRuntime is not ready. Start or retry it before running commands."); prompt(); return; }
+      const active = {controller: new AbortController(), process: null as WebContainerProcess | null};
+      let exited = false;
+      command.current = active; setBusy(true); write("\r\n");
+      try {
+        const [cmd, ...args] = text.split(/\s+/);
+        const spawned = current.spawnProcess ? current.spawnProcess(cmd, args, {terminal: {cols: terminal.cols, rows: terminal.rows}})
+          : current.webContainerInstance.spawn(cmd, args, {terminal: {cols: terminal.cols, rows: terminal.rows}});
+        // A spawn can finish after cancellation; dispose its late process.
+        void spawned.then(process => { if (active.controller.signal.aborted) { process.kill(); void process.exit.catch(() => undefined); } }, () => undefined);
+        const process = await waitForOperation(spawned, active.controller.signal); active.process = process;
+        void process.exit.catch(() => undefined);
+        let budget = 0;
+        const piping = consumeProcessOutput(process.output, active.controller.signal, async data => {
+          if (disposed || active.controller.signal.aborted) return;
+          output.enqueue(data); budget += data.length;
+          if (budget >= 16 * 1024) { budget = 0; await new Promise(resolve => setTimeout(resolve, 0)); }
+        });
+        void piping.catch(() => undefined);
+        const outputFailure = piping.then(() => new Promise<number>(() => undefined));
+        const code = await waitForOperation(Promise.race([process.exit, outputFailure]), active.controller.signal);
+        exited = true;
+        await waitForOperation(piping, active.controller.signal, 1000, "Output stream did not close").catch(() => {
+          if (!active.controller.signal.aborted && !disposed) write("\r\n[Remaining command output could not be drained]");
+        });
+        active.controller.abort();
+        if (!disposed) write(`\r\nProcess exited with code ${code}.`);
+      } catch (error) {
+        if (!disposed) write(active.controller.signal.aborted ? "\r\nCommand stopped." : `\r\nCommand failed: ${error instanceof Error ? error.message : "Unable to run command"}`);
+      } finally {
+        active.controller.abort(); if (!exited) active.process?.kill();
+        if (command.current === active) command.current = null;
+        if (!disposed) { setBusy(false); prompt(); }
       }
     };
-  }, [initializeTerminal]);
+    const input = terminal.onData(data => {
+      if (data === "\x03") {
+        if (command.current) stopCommand(); else {write("^C"); prompt();}
+        return;
+      }
+      if (command.current) return;
+      if (data === "\r") { void execute(); return; }
+      if (data === "\x7f") { if (line.current) {line.current = line.current.slice(0, -1); write("\b \b");} return; }
+      if (data === "\x1b[A" || data === "\x1b[B") {
+        if (!history.current.length) return;
+        if (data === "\x1b[B" && historyIndex.current === -1) return;
+        if (data === "\x1b[A") historyIndex.current = historyIndex.current < 0 ? history.current.length - 1 : Math.max(0, historyIndex.current - 1);
+        else historyIndex.current = historyIndex.current >= history.current.length - 1 ? -1 : historyIndex.current + 1;
+        line.current = historyIndex.current < 0 ? "" : history.current[historyIndex.current];
+        write("\r\x1b[2K$ " + line.current); return;
+      }
+      // Pasted control characters must not submit commands automatically.
+      if (data.startsWith("\x1b")) return;
+      const text = data.replace(/[\x00-\x1f\x7f]/g, "").slice(0, TERMINAL_INPUT_LIMIT - line.current.length);
+      line.current += text; write(text);
+    });
+    output.enqueue("LiveIDE terminal\r\nType 'help' for available commands.\r\n$ ");
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const resize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { if (!disposed) {
+        try {
+          const dimensions = fit.proposeDimensions();
+          if (dimensions) terminal.resize(Math.min(dimensions.cols, 500), Math.min(dimensions.rows, 200));
+        }
+        catch { setFailure(true); }
+      } }, 100);
+    };
+    const observer = new ResizeObserver(resize); observer.observe(host.current); resize();
+    return () => {
+      disposed = true; if (resizeTimer) clearTimeout(resizeTimer);
+      observer.disconnect(); input.dispose(); stopCommand(); command.current = null;
+      output.dispose(); terminal.dispose(); queue.current = null; term.current = null; search.current = null;
+    };
+  }, [clear, prompt, stopCommand, write]);
+  useEffect(() => { if (term.current) term.current.options.theme = themes[props.theme ?? "dark"]; }, [props.theme]);
+  useEffect(() => { if (!ready) stopCommand(); return () => stopCommand(); }, [ready, props.webContainerInstance, stopCommand]);
+  if (failure) throw new Error("Terminal display failed");
 
-  useEffect(() => {
-    if (webContainerInstance && term.current && !isConnected) {
-      connectToWebContainer();
-    }
-  }, [webContainerInstance, connectToWebContainer, isConnected]);
-
-  return (
-    <div className={cn("flex flex-col h-full bg-background border rounded-lg overflow-hidden", className)}>
-      {/* Terminal Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/50">
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            <div className="w-3 h-3 rounded-full bg-red-500"></div>
-            <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-            <div className="w-3 h-3 rounded-full bg-green-500"></div>
-          </div>
-          <span className="text-xs font-medium">Terminal</span>
-          {isConnected && (
-            <div className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-              <span className="text-xs text-muted-foreground">Connected</span>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1">
-          {showSearch && (
-            <div className="flex items-center gap-2">
-              <Input
-                placeholder="Search..."
-                value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  searchInTerminal(e.target.value);
-                }}
-                className="h-6 w-32 text-xs"
-              />
-            </div>
-          )}
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowSearch(!showSearch)}
-            className="h-6 w-6 p-0"
-          >
-            <Search className="h-3 w-3" />
-          </Button>
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={copyTerminalContent}
-            className="h-6 w-6 p-0"
-          >
-            <Copy className="h-3 w-3" />
-          </Button>
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={downloadTerminalLog}
-            className="h-6 w-6 p-0"
-          >
-            <Download className="h-3 w-3" />
-          </Button>
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={clearTerminal}
-            className="h-6 w-6 p-0"
-          >
-            <Trash2 className="h-3 w-3" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Terminal Content */}
-      <div className="flex-1 relative">
-        <div 
-          ref={terminalRef} 
-          className="absolute inset-0 p-2"
-          style={{ 
-            background: terminalThemes[theme].background,
-          }}
-        />
+  const copy = async () => { const selected = term.current?.getSelection(); if (selected && navigator.clipboard) await navigator.clipboard.writeText(selected).catch(() => undefined); };
+  const download = () => {
+    const buffer = term.current?.buffer.active; if (!buffer) return;
+    const lines = Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) ?? "");
+    const url = URL.createObjectURL(new Blob([lines.join("\n")], {type: "text/plain"}));
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "terminal-log.txt"; anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  return <div className={cn("flex flex-col h-full bg-background border rounded-lg overflow-hidden", props.className)}>
+    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b bg-muted/50">
+      <div className="flex items-center gap-2 text-xs"><span>Terminal</span><span>{ready ? busy ? "Running command" : "Ready" : "Runtime unavailable"}</span></div>
+      <div className="flex items-center gap-1">
+        {showSearch && <Input aria-label="Search terminal" placeholder="Search..." value={searchTerm} onChange={event => {setSearchTerm(event.target.value); search.current?.findNext(event.target.value);}} className="h-6 w-32 text-xs" />}
+        <Button variant="ghost" size="icon" className="size-7" aria-label="Stop terminal command" disabled={!busy} onClick={stopCommand}><Square className="size-3" /></Button>
+        <Button variant="ghost" size="icon" className="size-7" aria-label="Search terminal output" onClick={() => setShowSearch(value => !value)}><Search className="size-3" /></Button>
+        <Button variant="ghost" size="icon" className="size-7" aria-label="Copy terminal selection" onClick={copy}><Copy className="size-3" /></Button>
+        <Button variant="ghost" size="icon" className="size-7" aria-label="Download retained terminal output" onClick={download}><Download className="size-3" /></Button>
+        <Button variant="ghost" size="icon" className="size-7" aria-label="Clear terminal" onClick={clear}><Trash2 className="size-3" /></Button>
       </div>
     </div>
-  );
+    {truncated && <div role="status" className="px-3 py-1 text-xs text-muted-foreground">Older pending output omitted. Download contains retained output only.</div>}
+    <div className="flex-1 min-h-0 relative"><div ref={host} aria-label="Project terminal" className="absolute inset-0 p-2" /></div>
+  </div>;
 });
-
 TerminalComponent.displayName = "TerminalComponent";
-
 export default TerminalComponent;

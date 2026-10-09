@@ -1,11 +1,13 @@
 import { Button } from "@/components/ui/button";
 import { Github } from "lucide-react";
+import Link from "next/link";
 
 const AddRepo = () => (
-  <Button variant="outline" disabled title="GitHub import is planned but not implemented yet">
+  <Button variant="outline" asChild>
+    <Link href="/dashboard/github">
     <Github />
-    Import repository
-    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Soon</span>
+    Connect GitHub
+    </Link>
   </Button>
 );
 

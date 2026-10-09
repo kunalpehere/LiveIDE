@@ -11,6 +11,7 @@ const claims = {
   room: collaborationRoom("project-1", "src/App.tsx", 1),
   filePath: "src/App.tsx",
   revision: 1,
+  role: "EDITOR" as const,
   userId: "user-1",
   name: "Editor One",
   color: "#3b82f6",

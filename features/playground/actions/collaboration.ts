@@ -58,7 +58,9 @@ export async function updatePlaygroundCollaborator(playgroundId: string, members
     const parsedRole = z.enum(["EDITOR", "VIEWER"]).parse(role);
     const existing = await db.playgroundMember.findFirst({ where: { id: memberId, playgroundId: id } });
     if (!existing) throw new AppError("MEMBER_NOT_FOUND", "Collaborator not found", 404);
-    return db.playgroundMember.update({ where: { id: memberId }, data: { role: parsedRole } });
+    const member = await db.playgroundMember.update({ where: { id: memberId }, data: { role: parsedRole } });
+    revalidatePath(`/playground/${id}`);
+    return member;
   });
 }
 

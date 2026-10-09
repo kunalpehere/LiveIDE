@@ -1,14 +1,23 @@
 "use client"
 
-import { useRef, useEffect, useCallback, useState } from "react"
-import Editor, { type Monaco } from "@monaco-editor/react"
+import { useRef, useEffect, useCallback, useState, useMemo } from "react"
+import Editor, { loader, type Monaco } from "@monaco-editor/react"
 import { configureMonaco, defaultEditorOptions, getEditorLanguage } from "@/features/playground/libs/editor-config"
 import type { TemplateFile } from "@/features/playground/libs/path-to-json"
 import type { CancellationToken, IDisposable, Position, editor, languages } from "monaco-editor"
 import { useCollaborativeEditor } from "@/features/playground/hooks/useCollaborativeEditor"
 import { Users } from "lucide-react"
+import { CollaborationDiagnostics } from "./collaboration-diagnostics"
+import { useFollowCollaborator } from "../hooks/useFollowCollaborator"
 
 type CodeEditor = editor.IStandaloneCodeEditor
+
+// Forward the AMD loader option so it uses script tags rather than eval.
+if (typeof window !== "undefined") {
+  // Blob workers need an absolute base URL when resolving language workers.
+  const monacoLoaderConfiguration = { paths: { vs: new URL("/monaco/vs", window.location.origin).href }, preferScriptTags: true };
+  loader.config(monacoLoaderConfiguration);
+}
 
 interface PlaygroundEditorProps {
   readOnly?: boolean
@@ -45,6 +54,14 @@ export const PlaygroundEditor = ({
   const [editorInstance, setEditorInstance] = useState<CodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const inlineCompletionProviderRef = useRef<IDisposable | null>(null)
+  const editorListenersRef = useRef<IDisposable[]>([])
+  const ownedModelsRef = useRef(new Set<editor.ITextModel>())
+  const options = useMemo(() => ({ ...defaultEditorOptions, readOnly }), [readOnly])
+  const handleContentChange = useCallback((value: string | undefined) => {
+    if (!readOnly) onContentChange(value || "")
+  }, [readOnly, onContentChange])
+  const fileExtension = activeFile?.fileExtension || ""
+  const modelPath = `liveide:///${encodeURIComponent(playgroundId || "local")}/${(filePath || `${activeFile?.filename || "untitled"}.${fileExtension}`).split("/").map(encodeURIComponent).join("/")}`
   const currentSuggestionRef = useRef<{
     text: string
     position: { line: number; column: number }
@@ -55,12 +72,12 @@ export const PlaygroundEditor = ({
   const suggestionVisibleContextRef = useRef<editor.IContextKey<boolean> | null>(null)
   const onTriggerSuggestionRef = useRef(onTriggerSuggestion)
   const collaboration = useCollaborativeEditor({
-    enabled: collaborationEnabled && !readOnly,
+    enabled: collaborationEnabled,
     playgroundId,
     filePath,
-    initialContent: content,
     editorInstance,
   })
+  const follow = useFollowCollaborator({ enabled: collaborationEnabled, playgroundId, filePath, editorInstance })
 
   // Generate unique ID for each suggestion
   const generateSuggestionId = () => `suggestion-${Date.now()}-${Math.random()}`
@@ -234,7 +251,7 @@ export const PlaygroundEditor = ({
     if (suggestion && suggestionPosition) {
       currentSuggestionRef.current = { text: suggestion, position: suggestionPosition, id: generateSuggestionId() }
       suggestionVisibleContextRef.current?.set(true)
-      const language = getEditorLanguage(activeFile?.fileExtension || "")
+      const language = getEditorLanguage(fileExtension)
       const provider = createInlineCompletionProvider(monaco)
 
       inlineCompletionProviderRef.current = monaco.languages.registerInlineCompletionsProvider(language, provider)
@@ -253,9 +270,11 @@ export const PlaygroundEditor = ({
         inlineCompletionProviderRef.current = null
       }
     }
-  }, [suggestion, suggestionPosition, activeFile, createInlineCompletionProvider])
+  }, [suggestion, suggestionPosition, fileExtension, createInlineCompletionProvider])
 
   const handleEditorDidMount = (editor: CodeEditor, monaco: Monaco) => {
+    editorListenersRef.current.forEach(listener => listener.dispose());
+    editorListenersRef.current = [];
     // Safety check to ensure editor and monaco are properly initialized
     if (!editor || !monaco) {
       console.warn("Editor or Monaco not properly initialized")
@@ -263,6 +282,12 @@ export const PlaygroundEditor = ({
     }
     
     editorRef.current = editor
+    const rememberModel = () => {
+      const model = editor.getModel()
+      if (model) ownedModelsRef.current.add(model)
+    }
+    rememberModel()
+    editorListenersRef.current.push(editor.onDidChangeModel(rememberModel))
     setEditorInstance(editor)
     monacoRef.current = monaco
     suggestionVisibleContextRef.current = editor.createContextKey("liveideAiSuggestionVisible", false)
@@ -345,7 +370,7 @@ export const PlaygroundEditor = ({
 
     // Listen for cursor position changes to hide suggestions when moving away
     if (editor && typeof editor.onDidChangeCursorPosition === 'function') {
-      editor.onDidChangeCursorPosition((e: editor.ICursorPositionChangedEvent) => {
+      editorListenersRef.current.push(editor.onDidChangeCursorPosition((e: editor.ICursorPositionChangedEvent) => {
         if (isAcceptingSuggestionRef.current) return
 
       const newPosition = e.position
@@ -369,12 +394,12 @@ export const PlaygroundEditor = ({
         }
       }
 
-    })
+    }))
     }
 
     // Listen for content changes to detect manual typing over suggestions
     if (editor && typeof editor.onDidChangeModelContent === 'function') {
-      editor.onDidChangeModelContent((e: editor.IModelContentChangedEvent) => {
+      editorListenersRef.current.push(editor.onDidChangeModelContent((e: editor.IModelContentChangedEvent) => {
       if (isAcceptingSuggestionRef.current) return
 
       // If user types while there's a suggestion, clear it (unless it's our insertion)
@@ -395,7 +420,7 @@ export const PlaygroundEditor = ({
         }
       }
 
-    })
+    }))
     }
 
     if (typeof updateEditorLanguage === 'function') {
@@ -404,17 +429,17 @@ export const PlaygroundEditor = ({
   }
 
   const updateEditorLanguage = useCallback(() => {
-    if (!activeFile || !monacoRef.current || !editorRef.current) return
+    if (!fileExtension || !monacoRef.current || !editorRef.current) return
     const model = editorRef.current.getModel()
     if (!model) return
 
-    const language = getEditorLanguage(activeFile.fileExtension || "")
+    const language = getEditorLanguage(fileExtension)
     try {
       monacoRef.current.editor.setModelLanguage(model, language)
     } catch (error) {
       console.warn("Failed to set editor language:", error)
     }
-  }, [activeFile])
+  }, [fileExtension])
 
   useEffect(() => {
     updateEditorLanguage()
@@ -422,7 +447,17 @@ export const PlaygroundEditor = ({
 
   // Cleanup on unmount
   useEffect(() => {
+    const ownedModels = ownedModelsRef.current
     return () => {
+      editorListenersRef.current.forEach(listener => listener.dispose());
+      editorListenersRef.current = [];
+      // The React Monaco wrapper disposes the attached model. We own the
+      // inactive models retained for tab undo/cursor history.
+      const currentModel = editorRef.current?.getModel()
+      ownedModels.forEach(model => {
+        if (model !== currentModel && !model.isDisposed()) model.dispose()
+      })
+      ownedModels.clear()
       if (inlineCompletionProviderRef.current) {
         inlineCompletionProviderRef.current.dispose()
         inlineCompletionProviderRef.current = null
@@ -432,12 +467,30 @@ export const PlaygroundEditor = ({
   }, [])
 
   return (
-    <div className="h-full relative">
+    <div className="h-full relative flex flex-col">
+      {collaborationEnabled && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-3 py-2 text-xs" aria-label="Collaborator follow controls">
+          {follow.following !== null ? <>
+            <span role="status">Following {follow.participants.find(peer => peer.clientId === follow.following)?.user.name || "collaborator"}</span>
+            <button type="button" className="underline" onClick={follow.stop}>Stop following</button>
+          </> : <>
+            <label htmlFor="follow-collaborator">Follow collaborator</label>
+            <select id="follow-collaborator" aria-label="Follow collaborator" value="" disabled={follow.status !== "connected"} onChange={event => { if (event.target.value) follow.follow(Number(event.target.value)); }} className="max-w-48 rounded border bg-background">
+              <option value="">{follow.status === "connected" ? follow.participants.length ? "Choose participant" : "Nobody else online" : follow.status}</option>
+              {follow.participants.map(peer => <option key={peer.clientId} value={peer.clientId} disabled={!peer.view || peer.following !== null}>{peer.user.name} · {peer.view?.filePath || "No file open"}</option>)}
+            </select>
+            {follow.status === "failed" && <button type="button" className="underline" onClick={follow.retry}>Retry presence</button>}
+          </>}
+          {follow.message && <span role="status">{follow.message}</span>}
+        </div>
+      )}
+      {process.env.NODE_ENV === "development" && <CollaborationDiagnostics playgroundId={playgroundId} status={collaboration.status} getSnapshot={collaboration.getDiagnostics} />}
       {collaboration.status !== "disabled" && (
         <div className="absolute bottom-3 right-5 z-10 flex items-center gap-1 rounded-full border bg-background/90 px-2 py-1 text-xs shadow-sm">
-          <span className={`h-2 w-2 rounded-full ${collaboration.status === "connected" ? "bg-green-500" : collaboration.status === "error" ? "bg-red-500" : "bg-amber-500"}`} />
+          <span className={`h-2 w-2 rounded-full ${collaboration.status === "connected" ? "bg-green-500" : collaboration.status === "failed" ? "bg-red-500" : "bg-amber-500"}`} />
           <Users className="h-3 w-3" />
-          {collaboration.status === "connected" ? `${collaboration.participantCount} online` : collaboration.status}
+          {collaboration.status === "connected" ? `${collaboration.participantCount} online` : collaboration.errorMessage || collaboration.status}
+          {collaboration.status === "failed" && <button type="button" onClick={collaboration.retry} className="ml-2 underline">Retry collaboration</button>}
         </div>
       )}
       {/* Loading indicator */}
@@ -456,14 +509,21 @@ export const PlaygroundEditor = ({
         </div>
       )}
 
+      <div className="min-h-0 flex-1">
       <Editor
         height="100%"
-        value={content}
-        onChange={(value) => { if (!readOnly) onContentChange(value || "") }}
+        path={modelPath}
+        saveViewState
+        defaultValue={content}
+        // The wrapper calls setValue on every read-only value update, even
+        // when equal. Let the CRDT binding own viewer updates to avoid echoes.
+        value={readOnly && collaborationEnabled ? undefined : content}
+        onChange={handleContentChange}
         onMount={handleEditorDidMount}
         language={activeFile ? getEditorLanguage(activeFile.fileExtension || "") : "plaintext"}
-        options={{ ...defaultEditorOptions, readOnly }}
+        options={options}
       />
+      </div>
     </div>
   )
 }

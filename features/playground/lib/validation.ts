@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { validateProjectResources } from "@/lib/resource-limits";
+import { templateFolderSchema } from "../libs/path-to-json";
 
 export const playgroundIdSchema = z.string().trim().min(1).max(128);
 
@@ -13,20 +15,8 @@ export const editPlaygroundSchema = z.object({
   description: z.string().trim().max(500),
 });
 
-const MAX_TEMPLATE_BYTES = 2 * 1024 * 1024;
-
 export function parseTemplateData<T>(data: T): T {
-  let serialized: string;
-
-  try {
-    serialized = JSON.stringify(data);
-  } catch {
-    throw new Error("Playground content must be valid JSON");
-  }
-
-  if (!serialized || serialized.length > MAX_TEMPLATE_BYTES) {
-    throw new Error("Playground content exceeds the 2 MB save limit");
-  }
-
+  const { root } = validateProjectResources(data);
+  templateFolderSchema.parse(root);
   return data;
 }

@@ -1,0 +1,31 @@
+# Local credentials and tooling state
+.env*
+**/.env*
+*.pem
+.git/
+.vercel/
+.codex/
+.agents/
+.aws/
+
+# Dependencies and generated builds
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+out/
+build/
+starter-templates/**/dist/
+starter-templates/**/.angular/
+public/monaco/
+*.tsbuildinfo
+
+# Local logs, reports, and browser artifacts
+*.log
+coverage/
+reports/
+playwright-report/
+test-results/
+blob-report/
+collaboration-playwright-report/
+collaboration-test-results/

@@ -1,27 +1,27 @@
 import { TemplateFile, TemplateFolder } from "./path-to-json";
 
 export function findFilePath(
-  file: TemplateFile,
+  file: Pick<TemplateFile, "filename" | "fileExtension"> & { id?: string },
   folder: TemplateFolder,
   pathSoFar: string[] = []
 ): string | null {
-  for (const item of folder.items) {
-    if ("folderName" in item) {
-      const res = findFilePath(file, item, [...pathSoFar, item.folderName]);
-      if (res) return res;
-    } else {
-      if (
-        item.filename === file.filename &&
-        item.fileExtension === file.fileExtension
-      ) {
-        return [
-          ...pathSoFar,
-          item.filename + (item.fileExtension ? "." + item.fileExtension : ""),
-        ].join("/");
+  const walk = (current: TemplateFolder, parents: string[], matches: (item: TemplateFile, path: string) => boolean): string | null => {
+    for (const item of current.items) {
+      if ("folderName" in item) {
+        const found = walk(item, [...parents, item.folderName], matches);
+        if (found) return found;
+      } else {
+        const path = [...parents, item.filename + (item.fileExtension ? "." + item.fileExtension : "")].join("/");
+        if (matches(item, path)) return path;
       }
     }
-  }
-  return null;
+    return null;
+  };
+  // Tree selections retain object identity; open drafts retain their path ID.
+  // Resolve either before the name fallback to distinguish duplicate basenames.
+  return walk(folder, pathSoFar, item => item === file)
+    || (file.id ? walk(folder, pathSoFar, (item, path) => path === file.id && item.filename === file.filename && item.fileExtension === file.fileExtension) : null)
+    || walk(folder, pathSoFar, item => item.filename === file.filename && item.fileExtension === file.fileExtension);
 }
 
 

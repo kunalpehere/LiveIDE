@@ -9,6 +9,7 @@ describe("application error contract", () => {
   });
 
   it("maps expected failures to stable public codes", () => {
+    expect(errorDetails({ code: "P2034", message: "database transaction conflict" })).toMatchObject({ code: "WRITE_CONFLICT", status: 409, message: expect.stringContaining("Retry") });
     expect(errorDetails(new AppError("SAVE_CONFLICT", "Reload", 409))).toEqual({
       code: "SAVE_CONFLICT", message: "Reload", status: 409,
     });

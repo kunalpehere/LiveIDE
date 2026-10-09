@@ -3,20 +3,22 @@ import Google from "next-auth/providers/google"
 import Credentials from "next-auth/providers/credentials"
 import type { NextAuthConfig } from "next-auth"
 import { guestUser, isGuestSignInEnabled } from "@/lib/development-auth"
+import { getAuthConfiguration } from "@/lib/runtime-config.mjs"
 
+const configuration = getAuthConfiguration();
 const providers: NextAuthConfig["providers"] = [];
 
-if (process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET) {
+if (configuration.githubId && configuration.githubSecret) {
     providers.push(GitHub({
-            clientId:process.env.AUTH_GITHUB_ID,
-            clientSecret:process.env.AUTH_GITHUB_SECRET
+            clientId:configuration.githubId,
+            clientSecret:configuration.githubSecret
     }));
 }
 
-if (process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET) {
+if (configuration.googleId && configuration.googleSecret) {
     providers.push(Google({
-            clientId:process.env.AUTH_GOOGLE_ID,
-            clientSecret:process.env.AUTH_GOOGLE_SECRET,
+            clientId:configuration.googleId,
+            clientSecret:configuration.googleSecret,
     }));
 }
 
@@ -30,5 +32,6 @@ if (isGuestSignInEnabled()) {
 }
 
 export default{
+    secret: configuration.authSecret,
     providers,
 } satisfies NextAuthConfig

@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatMode } from "../types";
+import { RESOURCE_LIMITS, utf8Bytes } from "@/lib/resource-limits";
 
 interface ChatPayload {
   playgroundId: string;
@@ -20,10 +21,17 @@ async function responseError(response: Response) {
 }
 
 export async function requestChat(payload: ChatPayload, onChunk?: (chunk: string) => void): Promise<ChatResponse> {
+  const bounded = { ...payload, history: payload.history.slice(-10).map(message => ({ ...message, content: message.content.slice(-4_000) })) };
+  let body = JSON.stringify(bounded);
+  while (bounded.history.length && utf8Bytes(body) > RESOURCE_LIMITS.chatRequestBytes) {
+    bounded.history.shift();
+    body = JSON.stringify(bounded);
+  }
+  if (utf8Bytes(body) > RESOURCE_LIMITS.chatRequestBytes) throw new Error("Chat request exceeds 32,000 bytes. Shorten your question or attached context and retry.");
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body,
   });
   if (!response.ok) throw await responseError(response);
 

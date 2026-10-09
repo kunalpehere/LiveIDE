@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
+import { AppError } from "@/lib/errors";
+import { readLimitedBody, RESOURCE_LIMITS } from "@/lib/resource-limits";
 
 const buckets = new Map<string, { count: number; resetAt: number }>();
 
@@ -11,17 +13,20 @@ export class AIRequestError extends Error {
   }
 }
 
-export async function parseLimitedJson<T>(request: NextRequest, schema: z.ZodType<T>, maxBytes = 32_000) {
-  const declaredSize = Number(request.headers.get("content-length") || 0);
-  if (declaredSize > maxBytes) throw new AIRequestError(413, "REQUEST_TOO_LARGE", "AI request is too large");
-  const raw = await request.text();
-  if (new TextEncoder().encode(raw).byteLength > maxBytes) {
-    throw new AIRequestError(413, "REQUEST_TOO_LARGE", "AI request is too large");
-  }
+export async function parseLimitedJson<T>(request: NextRequest, schema: z.ZodType<T>, maxBytes: number = RESOURCE_LIMITS.chatRequestBytes) {
+  const raw = await readLimitedBody(request, maxBytes);
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new AIRequestError(400, "INVALID_JSON", "Request body must be valid JSON"); }
   const result = schema.safeParse(value);
-  if (!result.success) throw new AIRequestError(400, "VALIDATION_ERROR", result.error.issues[0]?.message || "Invalid request");
+  if (!result.success) {
+    const issues = [...result.error.issues];
+    while (issues.length) {
+      const issue = issues.shift()!;
+      if (issue.code === "too_big") throw new AIRequestError(400, "VALIDATION_ERROR", issue.message);
+      if (issue.code === "invalid_union") issues.push(...issue.unionErrors.flatMap(error => error.issues));
+    }
+    throw new AIRequestError(400, "VALIDATION_ERROR", result.error.issues[0]?.message || "Invalid request. Check the question and context and retry.");
+  }
   return result.data;
 }
 
@@ -48,7 +53,7 @@ export function redactSensitiveContent(value: string) {
 }
 
 export function aiErrorResponse(error: unknown) {
-  if (error instanceof AIRequestError) {
+  if (error instanceof AIRequestError || error instanceof AppError) {
     return NextResponse.json({ error: { code: error.code, message: error.message } }, { status: error.status });
   }
   const name = error instanceof Error ? error.name : "";

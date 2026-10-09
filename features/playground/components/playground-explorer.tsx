@@ -72,7 +72,7 @@ type TemplateItem = TemplateFile | TemplateFolder
 interface TemplateFileTreeProps {
   data: TemplateItem
   onFileSelect?: (file: TemplateFile) => void
-  selectedFile?: TemplateFile
+  selectedFile?: Pick<TemplateFile, "filename" | "fileExtension">
   title?: string
   onAddFile?: (file: TemplateFile, parentPath: string) => void
   onAddFolder?: (folder: TemplateFolder, parentPath: string) => void
@@ -209,7 +209,7 @@ export function TemplateFileTree({
 interface TemplateNodeProps {
   item: TemplateItem
   onFileSelect?: (file: TemplateFile) => void
-  selectedFile?: TemplateFile
+  selectedFile?: Pick<TemplateFile, "filename" | "fileExtension">
   level: number
   path?: string
   onAddFile?: (file: TemplateFile, parentPath: string) => void
@@ -478,4 +478,3 @@ function TemplateNode({
     )
   }
 }
-

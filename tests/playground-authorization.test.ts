@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   playgroundFindMany: vi.fn(),
   playgroundCreate: vi.fn(),
   playgroundUpdate: vi.fn(),
+  playgroundUpdateMany: vi.fn(),
   playgroundDelete: vi.fn(),
   templateFileUpsert: vi.fn(),
   templateFileUpdateMany: vi.fn(),
@@ -22,11 +23,13 @@ vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock("@/features/auth/actions", () => ({ currentUser: mocks.currentUser }));
 vi.mock("@/lib/db", () => ({
   db: {
+    $transaction: async (callback: any) => callback({ playground: { updateMany: mocks.playgroundUpdateMany, delete: mocks.playgroundDelete } }),
     playground: {
       findUnique: mocks.playgroundFindUnique,
       findMany: mocks.playgroundFindMany,
       create: mocks.playgroundCreate,
       update: mocks.playgroundUpdate,
+      updateMany: mocks.playgroundUpdateMany,
       delete: mocks.playgroundDelete,
     },
     templateFile: {
@@ -73,12 +76,20 @@ const templateData = {
 };
 
 beforeEach(() => {
+  mocks.playgroundUpdateMany.mockResolvedValue({ count: 1 });
   mocks.currentUser.mockResolvedValue(userA);
   mocks.playgroundFindUnique.mockResolvedValue(userBPlayground);
   mocks.playgroundMemberFindUnique.mockResolvedValue(null);
 });
 
 describe("playground ownership enforcement", () => {
+  it("rejects oversized saved files before any template mutation", async () => {
+    mocks.playgroundFindUnique.mockResolvedValue({ ...userBPlayground, userId: userA.id });
+    const oversized = { folderName: "Root", items: [{ filename: "large", fileExtension: "txt", content: "x".repeat(256 * 1024 + 1) }] };
+    expect(await SaveUpdatedCode(userBPlayground.id, oversized, 1)).toMatchObject({ success: false, code: "FILE_SIZE_LIMIT", message: expect.stringContaining("Reduce") });
+    expect(mocks.templateFileUpdateMany).not.toHaveBeenCalled();
+    expect(mocks.templateFileUpsert).not.toHaveBeenCalled();
+  });
   it("prevents User A from reading User B's playground", async () => {
     await expect(getPlaygroundById(userBPlayground.id)).rejects.toMatchObject({ name: "AuthorizationError" });
   });

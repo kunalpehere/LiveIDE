@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
+import { observeRoute } from "@/lib/observe-route"
 import { requireCurrentUser } from "@/features/playground/lib/authorization"
 import { createAIAbortSignal, getAIConfiguration, getAIProvider } from "@/features/ai-chat/server/provider"
 import { suggestionRequestSchema } from "@/features/ai-chat/server/schemas"
@@ -25,7 +26,7 @@ interface CodeContext {
   incompletePatterns: string[]
 }
 
-export async function GET() {
+async function handleGET() {
   try {
     await requireCurrentUser()
     return NextResponse.json(getAIConfiguration())
@@ -34,7 +35,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   try {
     const user = await requireCurrentUser()
     enforceRateLimit(user.id, "suggestion", 60)
@@ -223,3 +224,6 @@ function detectIncompletePatterns(line: string, column: number): string[] {
 
   return patterns
 }
+
+export const GET = observeRoute("/api/code-suggestion", handleGET);
+export const POST = observeRoute("/api/code-suggestion", handlePOST);

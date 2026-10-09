@@ -1,34 +1,45 @@
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import http from "node:http";
 import { SignJWT } from "jose";
 import WebSocket from "ws";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
+import { PROTOCOL_VERSION, collaborationRoom } from "../lib/collaboration-protocol.mjs";
+import { createProtocolWebSocket } from "../lib/collaboration-websocket.mjs";
 
 const secret = "stage-11-3-verification-secret";
-const room = `persistence-verification-${Date.now()}`;
+const room = collaborationRoom("verification", "src/App.tsx", 1);
 const collaborationPort = 1236;
 const appPort = 3137;
 let persistedState = null;
+let snapshotWrites = 0;
 
 const snapshotServer = http.createServer(async (request, response) => {
   if (request.headers["x-collaboration-secret"] !== secret) {
     response.writeHead(401).end();
     return;
   }
+  if (request.url === "/api/collaboration/access") {
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true, data: { protocolVersion: PROTOCOL_VERSION, playgroundId: "verification", room, filePath: "src/App.tsx", revision: 1, role: "EDITOR" } })); return;
+  }
   if (request.method === "POST") {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     persistedState = JSON.parse(Buffer.concat(chunks).toString()).state;
-    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true }));
+    snapshotWrites++;
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true, protocolVersion: PROTOCOL_VERSION }));
     return;
   }
-  response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true, data: persistedState ? { state: persistedState } : { content: "" } }));
+  response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true, data: {
+    protocolVersion: PROTOCOL_VERSION, playgroundId: "verification", room, filePath: "src/App.tsx", revision: 1,
+    ...(persistedState ? { state: persistedState } : { content: "" }),
+  } }));
 });
 await new Promise(resolve => snapshotServer.listen(appPort, "127.0.0.1", resolve));
 
 async function accessToken() {
-  return new SignJWT({ scope: "collaboration:write", playgroundId: "verification", room, filePath: "src/App.tsx", revision: 1, userId: "user-1" })
+  return new SignJWT({ protocolVersion: PROTOCOL_VERSION, role: "EDITOR", scope: "collaboration:write", playgroundId: "verification", room, filePath: "src/App.tsx", revision: 1, userId: "user-1", name: "Verification", color: "#3b82f6" })
     .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("2m")
     .sign(new TextEncoder().encode(secret));
 }
@@ -36,25 +47,32 @@ async function accessToken() {
 async function startCollaborationServer() {
   const child = spawn(process.execPath, ["scripts/collaboration-server.mjs"], {
     cwd: process.cwd(),
-    env: { ...process.env, COLLABORATION_SECRET: secret, COLLABORATION_PORT: String(collaborationPort), COLLABORATION_APP_URL: `http://127.0.0.1:${appPort}` },
+    env: { ...process.env, NODE_ENV: "development", COLLABORATION_TEST_MODE: "false", REDIS_URL: "", COLLABORATION_SECRET: secret, COLLABORATION_PORT: String(collaborationPort), COLLABORATION_APP_URL: `http://127.0.0.1:${appPort}` },
     stdio: ["ignore", "inherit", "inherit"],
+    windowsHide: true,
   });
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try { if ((await fetch(`http://127.0.0.1:${collaborationPort}`)).ok) return child; } catch {}
+  let spawnError;
+  child.once("error", error => { spawnError = error; });
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline && child.exitCode === null && !spawnError) {
+    try { if ((await fetch(`http://127.0.0.1:${collaborationPort}/healthz`, { signal: AbortSignal.timeout(1000) })).ok) return child; } catch {}
     await new Promise(resolve => setTimeout(resolve, 100));
   }
+  if (child.exitCode === null && !spawnError) await stopCollaborationServer(child);
   throw new Error("Collaboration server did not start");
 }
 
 async function stopCollaborationServer(child) {
+  if (child.exitCode !== null) return;
+  const exited = once(child, "exit");
   child.kill("SIGTERM");
-  await new Promise(resolve => child.once("exit", resolve));
+  await exited;
 }
 
 async function connect() {
   const document = new Y.Doc();
   const provider = new WebsocketProvider(`ws://127.0.0.1:${collaborationPort}`, room, document, {
-    WebSocketPolyfill: WebSocket,
+    WebSocketPolyfill: createProtocolWebSocket(WebSocket),
     disableBc: true,
     params: { token: await accessToken() },
   });
@@ -71,6 +89,13 @@ try {
   const first = await connect();
   first.document.getText("content").insert(0, "survives-restart");
   await new Promise(resolve => setTimeout(resolve, 2200));
+  const checkpoint = persistedState;
+  const writesBeforePresence = snapshotWrites;
+  first.provider.awareness.setLocalStateField("activeFile", "src/App.tsx");
+  for (let index = 0; index < 100; index++) first.provider.awareness.setLocalStateField("selection", { cursor: index });
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  if (!first.provider.wsconnected) throw new Error("Presence burst disconnected the authorized session");
+  if (snapshotWrites !== writesBeforePresence || persistedState !== checkpoint) throw new Error("Presence changed durable checkpoint state");
   first.provider.destroy();
   first.document.destroy();
   await stopCollaborationServer(child);
@@ -78,6 +103,7 @@ try {
   child = await startCollaborationServer();
   const second = await connect();
   const restored = second.document.getText("content").toString();
+  if (Array.from(second.document.share.keys()).some(key => key !== "content")) throw new Error("Presence leaked into durable document fields");
   second.provider.destroy();
   second.document.destroy();
   if (restored !== "survives-restart") throw new Error(`Unexpected restored state: ${restored}`);

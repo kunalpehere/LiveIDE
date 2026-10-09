@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { RESOURCE_LIMITS } from "@/lib/resource-limits";
 
 export interface TemplateFile {
   filename: string;
@@ -26,10 +27,10 @@ export interface ScanOptions {
 }
 
 export const DEFAULT_TEMPLATE_LIMITS = {
-  maxFileSize: 256 * 1024,
-  maxTotalSize: 2 * 1024 * 1024,
-  maxFiles: 250,
-  maxDepth: 20,
+  maxFileSize: RESOURCE_LIMITS.fileBytes,
+  maxTotalSize: RESOURCE_LIMITS.projectBytes,
+  maxFiles: RESOURCE_LIMITS.files,
+  maxDepth: RESOURCE_LIMITS.depth,
 } as const;
 
 const safeName = z.string().min(1).max(255).refine(

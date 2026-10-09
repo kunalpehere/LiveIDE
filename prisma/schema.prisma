@@ -25,6 +25,7 @@ model User {
   email    String    @unique
   image    String?
   accounts Account[]
+  githubConnection GitHubConnection?
   role     UserRole  @default(USER)
 
   myPlayground StarMark[]
@@ -57,6 +58,29 @@ model Account {
   @@index([userId])
 }
 
+// Separate repository authorization from identity-provider sign-in.
+model GitHubConnection {
+  id                 String @id @default(cuid()) @map("_id")
+  userId             String @unique
+  user               User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version            String
+  encryptedToken     String?
+  githubUserId       String?
+  login              String?
+  access             String?
+  scopes             String?
+  connectedAt        DateTime?
+  revokedAt          DateTime?
+  pendingStateHash   String?
+  pendingVerifier    String?
+  pendingExpiresAt   DateTime?
+  pendingAccess      String?
+  writeEnabled       Boolean @default(false)
+  pendingWrite       Boolean?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
 enum Templates {
   REACT
   NEXTJS
@@ -77,6 +101,9 @@ model Playground {
   description   String?
   template      Templates      @default(REACT)
   templateFiles TemplateFile[]
+  githubSource  Json?
+  githubCommitLock String?
+  githubCommitOperations GitHubCommitOperation[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   Starmark      StarMark[]
@@ -84,12 +111,33 @@ model Playground {
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   chatMessages  ChatMessage[]
   members       PlaygroundMember[]
+  invitations   PlaygroundInvitation[]
   collaborationDocuments CollaborationDocument[]
   snapshots     PlaygroundSnapshot[]
   historyEvents PlaygroundHistoryEvent[]
   collaborationRevision Int @default(1)
 
   @@index([userId, updatedAt])
+}
+
+model GitHubCommitOperation {
+  id String @id @default(cuid()) @map("_id")
+  playgroundId String
+  playground Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  userId String
+  connectionVersion String
+  status String
+  payload Json
+  blobIndex Int @default(0)
+  treeSha String?
+  commitSha String?
+  leaseOwner String?
+  leaseUntil DateTime?
+  errorCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([playgroundId, createdAt])
 }
 
 model PlaygroundSnapshot {
@@ -116,6 +164,12 @@ model PlaygroundHistoryEvent {
   actorName     String
   snapshotId    String?
   snapshotName  String?
+  snapshotVersion Int?
+  previousVersion Int?
+  resultingVersion Int?
+  restorePointId String?
+  restorePointName String?
+  collaborationRevision Int?
   createdAt     DateTime   @default(now())
 
   @@index([playgroundId, createdAt])
@@ -146,6 +200,22 @@ model PlaygroundMember {
 
   @@unique([playgroundId, userId])
   @@index([userId, updatedAt])
+}
+
+model PlaygroundInvitation {
+  id           String @id @default(cuid()) @map("_id")
+  playgroundId String
+  playground   Playground @relation(fields: [playgroundId], references: [id], onDelete: Cascade)
+  tokenHash    String @unique
+  role         PlaygroundMemberRole
+  createdById  String
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  usedAt       DateTime?
+  usedById     String?
+
+  @@index([playgroundId, createdAt])
 }
 
 model StarMark {

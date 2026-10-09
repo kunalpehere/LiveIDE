@@ -6,8 +6,9 @@ import { playgroundIdSchema } from "@/features/playground/lib/validation";
 import { templatePaths, type TemplateKey } from "@/lib/template";
 import { errorDetails } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { observeRoute } from "@/lib/observe-route";
 
-export async function GET(
+async function handleGET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -42,3 +43,5 @@ export async function GET(
     return Response.json({ error: { code: "TEMPLATE_LOAD_FAILED", message: "Failed to generate template" } }, { status: 500 });
   }
 }
+
+export const GET = observeRoute("/api/template/[id]", handleGET);

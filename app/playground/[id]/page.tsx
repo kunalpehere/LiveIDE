@@ -1,7 +1,10 @@
 "use client";
 
-import React, { useRef } from "react";
+import React from "react";
+import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useState, useCallback } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { TemplateFileTree } from "@/features/playground/components/playground-explorer";
@@ -16,6 +19,8 @@ import {
   X,
   Settings,
   PanelRight,
+  Play,
+  Github,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -39,11 +44,16 @@ import {
 } from "@/components/ui/resizable";
 import WebContainerPreview from "@/features/webcontainers/components/webcontainer-preview";
 import LoadingStep from "@/components/ui/loader";
-import { PlaygroundEditor } from "@/features/playground/components/playground-editor";
+const WorkspaceEditor = dynamic(() => import("@/features/playground/components/workspace-editor").then(module => module.WorkspaceEditor), { ssr: false });
+const ProjectNotes = dynamic(() => import("@/features/playground/components/project-notes"), { ssr: false });
+const SharedRuntimePanel = dynamic(() => import("@/features/webcontainers/components/shared-runtime-panel"), { ssr: false });
+import { useSharedRuntime } from "@/features/webcontainers/hooks/useSharedRuntime";
+import { useWorkspaceFiles } from "@/features/playground/hooks/useWorkspaceFiles";
 import ToggleAI from "@/features/playground/components/toggle-ai";
 import { useFileExplorer } from "@/features/playground/hooks/useFileExplorer";
 import { usePlayground } from "@/features/playground/hooks/usePlayground";
 import { useAISuggestions } from "@/features/playground/hooks/useAISuggestion";
+import { useLivePreview } from "@/features/webcontainers/hooks/useLivePreview";
 import { useWebContainer } from "@/features/webcontainers/hooks/useWebContainer";
 import { TemplateFolder, TemplateFile as TreeTemplateFile } from "@/features/playground/types";
 import { findFilePath } from "@/features/playground/libs";
@@ -66,6 +76,10 @@ const MainPlaygroundPage: React.FC = () => {
   });
 
   const [isPreviewVisible, setIsPreviewVisible] = useState(true);
+  const [livePreview, setLivePreview] = useState(false);
+  const [notesRequested, setNotesRequested] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [sharedRuntimeOpen, setSharedRuntimeOpen] = useState(false);
 
   // Custom hooks
   const { playgroundData, templateData, isLoading, error, saveTemplateData } =
@@ -78,19 +92,33 @@ const MainPlaygroundPage: React.FC = () => {
     closeAllFiles,
     openFile,
     closeFile,
-    updateFileContent,
     handleAddFile,
     handleAddFolder,
     handleDeleteFile,
     handleDeleteFolder,
     handleRenameFile,
     handleRenameFolder,
-    openFiles,
     setTemplateData,
     setActiveFileId,
     setPlaygroundId,
     setOpenFiles,
-  } = useFileExplorer();
+  } = useFileExplorer(useShallow(state => ({
+    activeFileId: state.activeFileId,
+    closeAllFiles: state.closeAllFiles,
+    openFile: state.openFile,
+    closeFile: state.closeFile,
+    handleAddFile: state.handleAddFile,
+    handleAddFolder: state.handleAddFolder,
+    handleDeleteFile: state.handleDeleteFile,
+    handleDeleteFolder: state.handleDeleteFolder,
+    handleRenameFile: state.handleRenameFile,
+    handleRenameFolder: state.handleRenameFolder,
+    setTemplateData: state.setTemplateData,
+    setActiveFileId: state.setActiveFileId,
+    setPlaygroundId: state.setPlaygroundId,
+    setOpenFiles: state.setOpenFiles,
+  })));
+  const openFiles = useWorkspaceFiles();
 
   const {
     serverUrl,
@@ -98,12 +126,29 @@ const MainPlaygroundPage: React.FC = () => {
     instance,
     writeFileSync,
     phase: runtimePhase,
+    startup: runtimeStartup,
     restart: restartRuntime,
+    stop: stopRuntime,
     spawnProcess,
     subscribeOutput,
-  } = useWebContainer({ projectId: id, templateData });
+  } = useWebContainer({ projectId: id, canEdit, templateData: playgroundData?.id === id && !isLoading ? templateData : null });
 
-  const lastSyncedContent = useRef<Map<string, string>>(new Map());
+  const live = useLivePreview({ projectId: id,
+    template: playgroundData?.id === id && !isLoading ? templateData : null,
+    phase: runtimePhase, enabled: livePreview, canEdit, writeFile: writeFileSync, restart: restartRuntime });
+  const runProject = (forceRestart = false) => {
+    if (!canEdit) return;
+    setIsPreviewVisible(true);
+    void live.run(forceRestart).catch(() => toast.error("Could not run project. Check the runtime output and retry."));
+  };
+  const sharing = useSharedRuntime({ playgroundId: id, enabled: collaborationEnabled && playgroundData?.id === id && !isLoading, canEdit,
+    phase: runtimePhase, previewReady: Boolean(serverUrl), subscribeOutput,
+    execute: async operation => {
+      if (!canEdit) throw new Error("Runtime operations require editor access");
+      if (operation === "stop") { stopRuntime(); return; }
+      setIsPreviewVisible(true); await live.run(operation === "restart");
+    },
+  });
 
   // Set template data when playground loads
   React.useEffect(() => {
@@ -188,16 +233,15 @@ const MainPlaygroundPage: React.FC = () => {
   const activeFilePath = activeFile && templateData ? findFilePath(activeFile, templateData) || undefined : undefined;
   const hasUnsavedChanges = openFiles.some((file) => file.hasUnsavedChanges);
 
-  const handleFileSelect = (file: TemplateFile) => {
-    openFile(file);
-  };
+  const handleFileSelect = openFile;
 
   const handleSave = useCallback(
     async (fileId?: string) => {
-      const targetFileId = fileId || activeFileId;
+      const state = useFileExplorer.getState();
+      const targetFileId = fileId || state.activeFileId;
       if (!targetFileId) return;
 
-      const fileToSave = openFiles.find((f) => f.id === targetFileId);
+      const fileToSave = state.openFiles.find((f) => f.id === targetFileId);
       if (!fileToSave) return;
 
       const latestTemplateData = useFileExplorer.getState().templateData;
@@ -237,13 +281,11 @@ const MainPlaygroundPage: React.FC = () => {
         // Sync with WebContainer
         if (writeFileSync) {
           await writeFileSync(filePath, fileToSave.content);
-          lastSyncedContent.current.set(fileToSave.id, fileToSave.content);
         }
 
         // Use saveTemplateData to persist changes
         await saveTemplateData(updatedTemplateData);
         setTemplateData(updatedTemplateData);
-        if (filePath === "package.json") await restartRuntime(updatedTemplateData);
 
         // Update open files
         const currentOpenFiles = useFileExplorer.getState().openFiles;
@@ -251,9 +293,8 @@ const MainPlaygroundPage: React.FC = () => {
           f.id === targetFileId
             ? {
                 ...f,
-                content: fileToSave.content,
                 originalContent: fileToSave.content,
-                hasUnsavedChanges: false,
+                hasUnsavedChanges: f.content !== fileToSave.content,
               }
             : f
         );
@@ -271,10 +312,7 @@ const MainPlaygroundPage: React.FC = () => {
       }
     },
     [
-      activeFileId,
-      openFiles,
       writeFileSync,
-      restartRuntime,
       saveTemplateData,
       setTemplateData,
       setOpenFiles,
@@ -282,7 +320,7 @@ const MainPlaygroundPage: React.FC = () => {
   );
 
   const handleSaveAll = async () => {
-    const unsavedFiles = openFiles.filter((f) => f.hasUnsavedChanges);
+    const unsavedFiles = useFileExplorer.getState().openFiles.filter((f) => f.hasUnsavedChanges);
 
     if (unsavedFiles.length === 0) {
       toast.info("No unsaved changes");
@@ -436,6 +474,7 @@ const MainPlaygroundPage: React.FC = () => {
                   </TooltipTrigger>
                   <TooltipContent>Save All (Ctrl+Shift+S)</TooltipContent>
                 </Tooltip>
+                {playgroundData?.githubImported && playgroundData.accessRole === "OWNER" && <Button asChild variant="outline" size="sm"><Link href={`/playground/${id}/github`} aria-label="GitHub changes" title="Review GitHub changes"><Github className="h-4 w-4" /><span className="hidden lg:inline">GitHub changes</span></Link></Button>}
 
                 <ToggleAI
                   playgroundId={id}
@@ -449,8 +488,22 @@ const MainPlaygroundPage: React.FC = () => {
                 />
 
                 <SharePlaygroundDialog playgroundId={id} />
+                <Button size="sm" variant={notesOpen ? "secondary" : "outline"} aria-pressed={notesOpen} onClick={() => { setSharedRuntimeOpen(false); setNotesRequested(true); setNotesOpen(value => !value); }}>Notes</Button>
+                <Button size="sm" variant={sharedRuntimeOpen ? "secondary" : "outline"} aria-pressed={sharedRuntimeOpen} onClick={() => { setNotesOpen(false); setSharedRuntimeOpen(value => !value); }}>Shared runtime</Button>
                 <PlaygroundHistoryDialog playgroundId={id} hasUnsavedChanges={hasUnsavedChanges} />
 
+                <Button size="sm" variant="outline" onClick={() => runProject()}
+                  disabled={!canEdit || !['ready', 'stopped', 'failed', 'idle'].includes(runtimePhase)}
+                  title="Run current drafts without saving">
+                  <Play className="h-4 w-4" /> Run
+                </Button>
+                <label className="flex items-center gap-1.5 text-xs" title="Update source drafts after a typing pause; Save still persists your work. Dependency edits need Save or Run.">
+                  <input type="checkbox" checked={livePreview} disabled={!canEdit}
+                    onChange={event => setLivePreview(event.target.checked)} /> Live preview
+                </label>
+                {livePreview && <span className="text-xs text-muted-foreground" role="status">
+                  {live.status === "pending" ? "Updating preview…" : live.status === "synced" ? "Source preview updated" : live.status === "error" ? "Preview sync failed · try Run" : "Live preview paused"}
+                </span>}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button size="sm" variant={isPreviewVisible ? "secondary" : "outline"} onClick={() => setIsPreviewVisible(!isPreviewVisible)} aria-pressed={isPreviewVisible}>
@@ -536,44 +589,37 @@ const MainPlaygroundPage: React.FC = () => {
                     direction="horizontal"
                     className="h-full"
                   >
-                    <ResizablePanel defaultSize={isPreviewVisible ? 50 : 100}>
-                      <PlaygroundEditor
+                    <ResizablePanel id="editor" order={1} defaultSize={50}>
+                      <WorkspaceEditor
                         readOnly={!canEdit}
                         collaborationEnabled={collaborationEnabled}
                         playgroundId={id}
                         filePath={activeFilePath}
-                        activeFile={activeFile}
-                        content={activeFile?.content || ""}
-                        onContentChange={(value) =>
-                          activeFileId && updateFileContent(activeFileId, value)
-                        }
                         suggestion={aiSuggestions.suggestion}
                         suggestionLoading={aiSuggestions.isLoading}
                         suggestionPosition={aiSuggestions.position}
-                        onAcceptSuggestion={(editor, monaco) =>
-                          aiSuggestions.acceptSuggestion(editor, monaco)
-                        }
-                        onRejectSuggestion={(editor) =>
-                          aiSuggestions.rejectSuggestion(editor)
-                        }
-                        onTriggerSuggestion={(type, editor) =>
-                          aiSuggestions.fetchSuggestion(type, editor)
-                        }
+                        onAcceptSuggestion={aiSuggestions.acceptSuggestion}
+                        onRejectSuggestion={aiSuggestions.rejectSuggestion}
+                        onTriggerSuggestion={aiSuggestions.fetchSuggestion}
                       />
                     </ResizablePanel>
 
                     {isPreviewVisible && (
                       <>
                         <ResizableHandle />
-                        <ResizablePanel defaultSize={50}>
+                        <ResizablePanel id="preview" order={2} defaultSize={50}>
                           <WebContainerPreview
+                            canEdit={canEdit}
+                            projectId={id}
                             instance={instance}
                             phase={runtimePhase}
+                            startup={runtimeStartup}
                             error={containerError}
                             serverUrl={serverUrl}
                             spawnProcess={spawnProcess}
                             subscribeOutput={subscribeOutput}
-                            onRetry={() => void restartRuntime(templateData)}
+                            onRetry={() => runProject(true)}
+                            onStop={stopRuntime}
                           />
                         </ResizablePanel>
                       </>
@@ -583,6 +629,12 @@ const MainPlaygroundPage: React.FC = () => {
               </div>
             ) : (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-muted-foreground">
+                {runtimePhase === "unsupported" && (
+                  <div role="alert" className="max-w-md rounded-lg border p-4">
+                    <h2 className="text-sm font-semibold text-foreground">Browser runtime unavailable</h2>
+                    <p className="mt-2 text-sm">{containerError}</p>
+                  </div>
+                )}
                 <span className="grid size-12 place-items-center rounded-lg border bg-muted/30"><FileText className="h-5 w-5" /></span>
                 <div className="text-center">
                   <p className="text-sm font-medium text-foreground">No file selected</p>
@@ -593,7 +645,7 @@ const MainPlaygroundPage: React.FC = () => {
               </div>
             )}
             <StatusBar
-              isConnected={runtimePhase === "running"}
+              isConnected={runtimePhase === "ready"}
               hasUnsavedChanges={hasUnsavedChanges}
               activeFile={activeFile ? `${activeFile.filename}.${activeFile.fileExtension}` : undefined}
               language={activeFile?.fileExtension || "plaintext"}
@@ -603,6 +655,8 @@ const MainPlaygroundPage: React.FC = () => {
             />
           </div>
         </SidebarInset>
+        {notesRequested && <ProjectNotes key={id} playgroundId={id} enabled={collaborationEnabled} canEdit={canEdit} open={notesOpen} onClose={() => setNotesOpen(false)} />}
+        {sharedRuntimeOpen && <SharedRuntimePanel sharing={sharing} canEdit={canEdit} onClose={() => setSharedRuntimeOpen(false)} />}
 
       <ConfirmationDialog
       isOpen={confirmationDialog.isOpen}

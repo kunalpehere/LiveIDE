@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AIRequestError } from "./security";
+import { assertChatMessage, readLimitedBody } from "@/lib/resource-limits";
 
 const ollamaResponseSchema = z.object({ response: z.string() });
 
@@ -31,8 +32,9 @@ export class OllamaProvider implements AIProvider {
       body: this.body(prompt, false, options.maxTokens, options.temperature), signal: options.signal,
     });
     if (!response.ok) throw new AIRequestError(502, "PROVIDER_ERROR", `AI provider returned ${response.status}`);
-    const parsed = ollamaResponseSchema.safeParse(await response.json());
+    const parsed = ollamaResponseSchema.safeParse(JSON.parse(await readLimitedBody(response, 512 * 1024)));
     if (!parsed.success || !parsed.data.response.trim()) throw new AIRequestError(502, "INVALID_PROVIDER_RESPONSE", "AI provider returned an invalid response");
+    assertChatMessage(parsed.data.response);
     return parsed.data.response.trim();
   }
 
@@ -47,12 +49,21 @@ export class OllamaProvider implements AIProvider {
     let buffer = "";
     return response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
+        if (chunk.byteLength > 512 * 1024) throw new AIRequestError(413, "PROVIDER_RESPONSE_LIMIT", "AI provider sent too much data. Ask a narrower question and retry.");
         buffer += decoder.decode(chunk, { stream: true });
+        if (buffer.length > 512 * 1024) throw new AIRequestError(413, "PROVIDER_RESPONSE_LIMIT", "AI provider sent an oversized stream record. Ask a narrower question and retry.");
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) {
           if (!line.trim()) continue;
           const parsed = ollamaResponseSchema.safeParse(JSON.parse(line));
+          if (parsed.success) controller.enqueue(encoder.encode(parsed.data.response));
+        }
+      },
+      flush(controller) {
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          const parsed = ollamaResponseSchema.safeParse(JSON.parse(buffer));
           if (parsed.success) controller.enqueue(encoder.encode(parsed.data.response));
         }
       },

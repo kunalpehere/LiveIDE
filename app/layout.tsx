@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/providers/theme-providers";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/auth";
 import { Toaster } from "@/components/ui/sonner";
+import { headers } from "next/headers";
 
 export const metadata: Metadata = {
   title: "LiveIDE — Collaborative Browser IDE",
@@ -18,13 +19,17 @@ export default async function RootLayout({
 }>) {
 
   const session = await auth()
+  const nonce = (await headers()).get("x-nonce") || undefined;
+  const requestId = (await headers()).get("x-request-id") || undefined;
   return (
     <SessionProvider session={session}>
     <html lang="en" suppressHydrationWarning>
+      <head><meta name="liveide-request-id" content={requestId} /></head>
       <body
         className="font-sans antialiased"
       >
         <ThemeProvider
+        nonce={nonce}
         attribute="class"
         defaultTheme="system"
         enableSystem

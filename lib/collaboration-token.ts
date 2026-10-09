@@ -1,21 +1,18 @@
 import { SignJWT, jwtVerify } from "jose";
+import { PROTOCOL_VERSION, parseClaims } from "./collaboration-protocol.mjs";
+import type { CollaborationClaims as WireClaims } from "./collaboration-protocol";
+export { collaborationRoom } from "./collaboration-protocol.mjs";
 
-export interface CollaborationClaims {
-  playgroundId: string;
-  room: string;
-  filePath: string;
-  revision: number;
-  userId: string;
-  name: string;
-  color: string;
-}
+export type CollaborationClaims = Omit<WireClaims, "scope" | "iat" | "exp" | "protocolVersion">;
 
 function signingKey(secret: string) {
   return new TextEncoder().encode(secret);
 }
 
 export async function createCollaborationToken(claims: CollaborationClaims, secret: string) {
-  return new SignJWT({ ...claims, scope: "collaboration:write" })
+  const now = Math.floor(Date.now() / 1000);
+  const payload = parseClaims({ ...claims, scope: claims.role === "VIEWER" ? "collaboration:read" : "collaboration:write", protocolVersion: PROTOCOL_VERSION, iat: now, exp: now + 600 });
+  return new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime("10m")
@@ -24,14 +21,5 @@ export async function createCollaborationToken(claims: CollaborationClaims, secr
 
 export async function verifyCollaborationToken(token: string, secret: string) {
   const { payload } = await jwtVerify(token, signingKey(secret), { algorithms: ["HS256"] });
-  if (payload.scope !== "collaboration:write" || typeof payload.playgroundId !== "string" ||
-      typeof payload.room !== "string" || typeof payload.filePath !== "string" || typeof payload.revision !== "number" || typeof payload.userId !== "string") {
-    throw new Error("Invalid collaboration token");
-  }
-  return payload as unknown as CollaborationClaims;
-}
-
-export function collaborationRoom(playgroundId: string, filePath: string, revision = 1) {
-  const encodedPath = Buffer.from(filePath, "utf8").toString("base64url");
-  return `${playgroundId}.r${revision}.${encodedPath}`;
+  return parseClaims(payload);
 }

@@ -3,12 +3,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
 import { getPlaygroundById, SaveUpdatedCode } from '@/features/playground/actions';
 import type { TemplateFolder } from '@/features/playground/libs/path-to-json';
+import { validateProjectResources } from '@/lib/resource-limits';
 
 interface PlaygroundData {
   id: string;
   title: string;
   description: string | null;
   template: string;
+  githubImported?: boolean;
   accessRole: "OWNER" | "EDITOR" | "VIEWER";
 }
 
@@ -46,6 +48,11 @@ export const usePlayground = (id: string): UsePlaygroundReturn => {
         toast.success("Playground loaded successfully");
         return;
       }
+      if (rawContent && typeof rawContent === "object" && !Array.isArray(rawContent) && "folderName" in rawContent && "items" in rawContent && Array.isArray(rawContent.items)) {
+        setTemplateData(rawContent as unknown as TemplateFolder);
+        toast.success("Playground loaded successfully");
+        return;
+      }
 
       // Load template from API if not in saved content
       const res = await fetch(`/api/template/${id}`);
@@ -76,6 +83,7 @@ export const usePlayground = (id: string): UsePlaygroundReturn => {
 
   const saveTemplateData = useCallback(async (data: TemplateFolder) => {
     try {
+      validateProjectResources(data);
       const saved = await SaveUpdatedCode(id, data, documentVersion.current);
       if (!saved.success) {
         throw new Error(`${saved.code}: ${saved.message}`);
@@ -88,7 +96,7 @@ export const usePlayground = (id: string): UsePlaygroundReturn => {
       if (error instanceof Error && error.message.includes("SAVE_CONFLICT")) {
         toast.error("This playground changed in another session. Reload before saving again.");
       } else {
-        toast.error("Failed to save changes");
+        toast.error(error instanceof Error ? error.message : "Failed to save changes. Please retry.");
       }
       throw error;
     }

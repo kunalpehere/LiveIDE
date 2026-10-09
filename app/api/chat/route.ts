@@ -1,7 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { observeRoute } from "@/lib/observe-route";
 
 import { requireCurrentUser, requirePlaygroundAccess } from "@/features/playground/lib/authorization";
 import { db } from "@/lib/db";
+import { assertChatMessage, RESOURCE_LIMITS } from "@/lib/resource-limits";
 import { createAIAbortSignal, getAIProvider } from "@/features/ai-chat/server/provider";
 import { chatRequestSchema, historyQuerySchema } from "@/features/ai-chat/server/schemas";
 import { aiErrorResponse, enforceRateLimit, parseLimitedJson, redactSensitiveContent } from "@/features/ai-chat/server/security";
@@ -17,11 +19,18 @@ function buildChatPrompt(history: Array<{ role: string; content: string }>, mess
 }
 
 async function persistMessage(userId: string, playgroundId: string | undefined, role: "user" | "assistant", content: string) {
+  assertChatMessage(content);
   if (!playgroundId) return;
-  await db.chatMessage.create({ data: { userId, playgroundId, role, content } });
+  await db.$transaction(async tx => {
+    const project = await tx.playground.findUniqueOrThrow({ where: { id: playgroundId }, select: { updatedAt: true } });
+    await tx.playground.update({ where: { id: playgroundId }, data: { updatedAt: new Date(Math.max(Date.now(), project.updatedAt.getTime() + 1)) } });
+    await tx.chatMessage.create({ data: { userId, playgroundId, role, content } });
+    const older = await tx.chatMessage.findMany({ where: { userId, playgroundId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: RESOURCE_LIMITS.chatMessages, select: { id: true } });
+    if (older.length) await tx.chatMessage.deleteMany({ where: { id: { in: older.map(item => item.id) }, userId, playgroundId } });
+  });
 }
 
-export async function POST(request: NextRequest) {
+async function handlePOST(request: NextRequest) {
   try {
     const user = await requireCurrentUser();
     const body = await parseLimitedJson(request, chatRequestSchema);
@@ -33,6 +42,7 @@ export async function POST(request: NextRequest) {
       const context = body.context ? redactSensitiveContent(JSON.stringify(body.context)) : "No additional context";
       const prompt = `Improve this coding request while preserving its intent. Return only the enhanced request.\n\nRequest: ${redactSensitiveContent(body.prompt)}\n\nContext: ${context}`;
       const enhancedPrompt = await provider.generate(prompt, { maxTokens: 500, temperature: 0.3, signal });
+      assertChatMessage(enhancedPrompt);
       return NextResponse.json({ enhancedPrompt, model: provider.model });
     }
 
@@ -44,12 +54,21 @@ export async function POST(request: NextRequest) {
     if (body.stream) {
       const providerStream = await provider.stream(prompt, { signal });
       let completeResponse = "";
+      let responseBytes = 0;
+      const decoder = new TextDecoder();
       const persistedStream = providerStream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
-          completeResponse += new TextDecoder().decode(chunk, { stream: true });
+          responseBytes += chunk.byteLength;
+          if (responseBytes > RESOURCE_LIMITS.chatMessageBytes) {
+            controller.enqueue(new TextEncoder().encode("\n[Response stopped at 64 KiB. Ask a narrower question or request smaller sections.]"));
+            controller.terminate();
+            return;
+          }
+          completeResponse += decoder.decode(chunk, { stream: true });
           controller.enqueue(chunk);
         },
         async flush() {
+          completeResponse += decoder.decode();
           if (completeResponse) await persistMessage(user.id, body.playgroundId, "assistant", completeResponse);
         },
       }));
@@ -66,7 +85,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
   try {
     const user = await requireCurrentUser();
     const query = historyQuerySchema.safeParse({ playgroundId: request.nextUrl.searchParams.get("playgroundId") });
@@ -74,12 +93,15 @@ export async function GET(request: NextRequest) {
     await requirePlaygroundAccess(query.data.playgroundId);
     const messages = await db.chatMessage.findMany({
       where: { userId: user.id, playgroundId: query.data.playgroundId },
-      orderBy: { createdAt: "asc" },
-      take: 100,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: RESOURCE_LIMITS.chatMessages,
       select: { id: true, role: true, content: true, createdAt: true },
     });
-    return NextResponse.json({ messages });
+    return NextResponse.json({ messages: messages.reverse(), retention: "The latest 100 messages per user and project are retained." });
   } catch (error) {
     return aiErrorResponse(error);
   }
 }
+
+export const POST = observeRoute("/api/chat", handlePOST);
+export const GET = observeRoute("/api/chat", handleGET);

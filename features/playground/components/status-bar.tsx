@@ -29,7 +29,7 @@ export function StatusBar({
           <GitBranch className="size-3" /> main
         </span>
         <span className="inline-flex items-center gap-1">
-          <Circle className={`size-2 fill-current ${isConnected ? "text-emerald-500" : runtimePhase === "error" ? "text-destructive" : "text-amber-500"}`} />
+          <Circle className={`size-2 fill-current ${isConnected ? "text-emerald-500" : runtimePhase === "failed" ? "text-destructive" : "text-amber-500"}`} />
           runtime: {runtimePhase}
         </span>
         {collaborationEnabled && (

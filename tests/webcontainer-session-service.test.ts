@@ -29,6 +29,7 @@ function runtimeFixture() {
         return server;
       }),
     on: vi.fn((_event: string, listener: (port: number, url: string) => void) => {
+      if (_event === "error") return vi.fn();
       serverReady = listener;
       return unsubscribe;
     }),
@@ -44,6 +45,21 @@ afterEach(() => {
 });
 
 describe("WebContainerSessionService", () => {
+  it("disposes a runtime that finishes booting after the last consumer leaves", async () => {
+    vi.useFakeTimers();
+    const fixture = runtimeFixture();
+    let resolveBoot!: (instance: WebContainer) => void;
+    const service = new WebContainerSessionService(() => new Promise(resolve => { resolveBoot = resolve; }));
+    const boot = service.acquire();
+    const rejected = expect(boot).rejects.toThrow("cancelled");
+    await Promise.resolve();
+    service.release();
+    await vi.advanceTimersByTimeAsync(250);
+    resolveBoot(fixture.instance);
+    await rejected;
+    expect(fixture.instance.teardown).toHaveBeenCalledOnce();
+    expect(service.getState().phase).toBe("stopped");
+  });
   it("boots only once for concurrent consumers", async () => {
     const fixture = runtimeFixture();
     const boot = vi.fn().mockResolvedValue(fixture.instance);
@@ -83,8 +99,10 @@ describe("WebContainerSessionService", () => {
     expect(fixture.instance.mount).toHaveBeenCalledOnce();
     expect(fixture.instance.spawn).toHaveBeenNthCalledWith(1, "npm", ["install"], undefined);
     expect(fixture.instance.spawn).toHaveBeenNthCalledWith(2, "npm", ["run", "start"], undefined);
-    expect(service.getState()).toEqual({
-      phase: "running",
+    expect(service.getState()).toMatchObject({
+      phase: "ready",
+      projectId: "project-1",
+      instance: fixture.instance,
       serverUrl: "http://localhost:5173",
       error: null,
     });

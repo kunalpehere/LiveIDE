@@ -1,13 +1,10 @@
-import { z } from "zod";
+import { PROTOCOL_VERSION, documentRevision, tokenRequestSchema, tokenResponseSchema, requireProtocolVersion, CollaborationProtocolError, protocolErrorResponse } from "@/lib/collaboration-protocol.mjs";
+import { observeRoute } from "@/lib/observe-route";
 
-import { requirePlaygroundEditor } from "@/features/playground/lib/authorization";
+import { requirePlaygroundAccess } from "@/features/playground/lib/authorization";
 import { collaborationRoom, createCollaborationToken } from "@/lib/collaboration-token";
 import { errorDetails } from "@/lib/errors";
-
-const requestSchema = z.object({
-  playgroundId: z.string().min(1).max(128),
-  filePath: z.string().min(1).max(1024),
-});
+import { getCollaborationConfiguration } from "@/lib/runtime-config.mjs";
 
 const colors = ["#ef4444", "#3b82f6", "#22c55e", "#a855f7", "#f59e0b", "#06b6d4"];
 function userColor(userId: string) {
@@ -16,29 +13,36 @@ function userColor(userId: string) {
   return colors[Math.abs(hash) % colors.length];
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
-    const parsed = requestSchema.safeParse(await request.json());
+    let body: unknown;
+    try { body = await request.json(); } catch { throw new CollaborationProtocolError("MALFORMED_MESSAGE"); }
+    requireProtocolVersion(body);
+    const parsed = tokenRequestSchema.safeParse(body);
     if (!parsed.success) {
-      return Response.json({ error: { code: "VALIDATION_ERROR", message: "Invalid collaboration request" } }, { status: 400 });
+      throw new CollaborationProtocolError("MALFORMED_MESSAGE");
     }
 
-    const websocketUrl = process.env.NEXT_PUBLIC_COLLABORATION_URL;
-    const secret = process.env.COLLABORATION_SECRET || process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
+    const { websocketUrl, secret } = getCollaborationConfiguration();
     if (!websocketUrl || !secret) {
-      return Response.json({ error: { code: "COLLABORATION_DISABLED", message: "Real-time collaboration is not configured" } }, { status: 503 });
+      return Response.json(protocolErrorResponse("UNAVAILABLE"), { status: 503 });
     }
 
-    const { user, playground } = await requirePlaygroundEditor(parsed.data.playgroundId);
-    const revision = playground.collaborationRevision;
+    const { user, playground, role } = await requirePlaygroundAccess(parsed.data.playgroundId);
+    const revision = documentRevision(playground.collaborationRevision, parsed.data.filePath);
     const room = collaborationRoom(parsed.data.playgroundId, parsed.data.filePath, revision);
     const name = user.name || user.email || "Collaborator";
     const color = userColor(user.id);
-    const token = await createCollaborationToken({ playgroundId: parsed.data.playgroundId, room, filePath: parsed.data.filePath, revision, userId: user.id, name, color }, secret);
+    const token = await createCollaborationToken({ playgroundId: parsed.data.playgroundId, room, filePath: parsed.data.filePath, revision, role, userId: user.id, name, color }, secret);
 
-    return Response.json({ success: true, data: { websocketUrl, token, room, user: { id: user.id, name, color } } });
+    return Response.json(tokenResponseSchema.parse({ success: true, data: { protocolVersion: PROTOCOL_VERSION, playgroundId: parsed.data.playgroundId, filePath: parsed.data.filePath,
+      revision, role, websocketUrl, token, room, user: { id: user.id, name, color } } }));
   } catch (error) {
+    if (error instanceof CollaborationProtocolError) return Response.json(protocolErrorResponse(error.code), { status: error.code === "VERSION_MISMATCH" ? 426 : error.code === "FORBIDDEN" ? 403 : 400 });
     const details = errorDetails(error);
-    return Response.json({ error: { code: details.code, message: details.message } }, { status: details.status });
+    const code = details.status === 401 ? "UNAUTHORIZED" : details.status === 403 ? "FORBIDDEN" : "UNAVAILABLE";
+    return Response.json(protocolErrorResponse(code), { status: details.status });
   }
 }
+
+export const POST = observeRoute("/api/collaboration/token", handlePOST);

@@ -3,7 +3,7 @@ import { PrismaAdapter } from "@auth/prisma-adapter"
 
 import authConfig from "./auth.config"
 import { db } from "./lib/db";
-import { getAccountByUserId, getUserById } from "@/features/auth/actions";
+import { isGuestSignInEnabled } from "@/lib/development-auth";
 
  
 
@@ -17,7 +17,7 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
       if (!user || !account) return false;
 
       if (account.provider === "guest") {
-        return process.env.NODE_ENV !== "production" && process.env.ENABLE_MOCK_DB === "true";
+        return isGuestSignInEnabled();
       }
 
       // Check if the user already exists
@@ -87,11 +87,9 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
 
     async jwt({ token, user, account }) {
       if(!token.sub) return token;
-      const existingUser = await getUserById(token.sub)
+      const existingUser = await db.user.findUnique({ where: { id: token.sub }, select: { id: true, name: true, email: true, role: true } })
 
       if(!existingUser) return token;
-
-      const exisitingAccount = await getAccountByUserId(existingUser.id);
 
       token.name = existingUser.name;
       token.email = existingUser.email;
@@ -114,7 +112,6 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
     },
   },
   
-  secret: process.env.AUTH_SECRET,
   adapter: PrismaAdapter(db),
   session: { strategy: "jwt" },
   ...authConfig,

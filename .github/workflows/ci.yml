@@ -5,15 +5,28 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      AUTH_SECRET: ci-only-secret-not-for-production
-      NEXTAUTH_SECRET: ci-only-secret-not-for-production
+      # Public build fixtures only. Never use these values in a deployment.
+      AUTH_SECRET: 91d76ac0048ef23b594069cdddfe8732b0a516cf7629804ee574312acd852609
+      NEXTAUTH_SECRET: 91d76ac0048ef23b594069cdddfe8732b0a516cf7629804ee574312acd852609
+      NEXT_PUBLIC_COLLABORATION_URL: ""
+      COLLABORATION_SECRET: ""
       NEXTAUTH_URL: http://localhost:3000
       DATABASE_URL: mongodb://127.0.0.1:27017/liveide-ci-build
+      ENABLE_MOCK_DB: "false"
+      AI_ENABLED: "false"
+      NEXT_TELEMETRY_DISABLED: "1"
 
     steps:
       - name: Check out repository
@@ -22,7 +35,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
@@ -40,6 +53,12 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Measure collaboration performance
+        run: npm run verify:collaboration:performance
+
+      - name: Evaluate project storage
+        run: npm run verify:storage
+
       - name: Build
         run: npm run build
 
@@ -49,6 +68,9 @@ jobs:
       - name: End-to-end tests
         run: npm run test:e2e
 
+      - name: Collaboration experience end-to-end tests
+        run: npm run test:e2e:collaboration
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -57,5 +79,34 @@ jobs:
           path: |
             playwright-report/
             test-results/
+            collaboration-playwright-report/
+            collaboration-test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: reports/unit-tests.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload collaboration performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collaboration-performance
+          path: reports/collaboration-performance.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload storage evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-evaluation
+          path: reports/storage-evaluation.json
           if-no-files-found: ignore
           retention-days: 14

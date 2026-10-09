@@ -6,6 +6,7 @@ import { generateFileId } from "../libs";
 import type { WebContainer } from "@webcontainer/api";
 
 interface FileExplorerState {
+  navigationVersion: number;
   playgroundId: string;
   templateData: TemplateFolder | null;
   openFiles: OpenFile[];
@@ -18,7 +19,7 @@ interface FileExplorerState {
   setEditorContent: (content: string) => void;
   setOpenFiles: (files: OpenFile[]) => void;
   setActiveFileId: (fileId: string | null) => void;
-  openFile: (file: TemplateFile) => void;
+  openFile: (file: TemplateFile, origin?: "follow") => void;
   closeFile: (fileId: string) => void;
   closeAllFiles: () => void;
   handleAddFile: (
@@ -68,6 +69,7 @@ interface OpenFile extends TemplateFile {
 }
 
 export const useFileExplorer = create<FileExplorerState>((set, get) => ({
+  navigationVersion: 0,
   templateData: null,
   playgroundId: "",
   openFiles: [] satisfies OpenFile[],
@@ -80,9 +82,10 @@ export const useFileExplorer = create<FileExplorerState>((set, get) => ({
   },
   setEditorContent: (content) => set({ editorContent: content }),
   setOpenFiles: (files) => set({ openFiles: files }),
-  setActiveFileId: (fileId) => set({ activeFileId: fileId }),
+  setActiveFileId: (fileId) => set(state => ({ activeFileId: fileId, navigationVersion: state.navigationVersion + 1 })),
 
-  openFile: (file) => {
+  openFile: (file, origin) => {
+    if (origin !== "follow") set(state => ({ navigationVersion: state.navigationVersion + 1 }));
     const fileId = generateFileId(file, get().templateData!);
     const { openFiles } = get();
     const existingFile = openFiles.find((f) => f.id === fileId);
@@ -108,6 +111,7 @@ export const useFileExplorer = create<FileExplorerState>((set, get) => ({
   },
 
   closeFile: (fileId) => {
+    set(state => ({ navigationVersion: state.navigationVersion + 1 }));
     const { openFiles, activeFileId } = get();
     const newFiles = openFiles.filter((f) => f.id !== fileId);
     
@@ -137,6 +141,7 @@ export const useFileExplorer = create<FileExplorerState>((set, get) => ({
 
   closeAllFiles: () => {
     set({
+      navigationVersion: get().navigationVersion + 1,
       openFiles: [],
       activeFileId: null,
       editorContent: "",
