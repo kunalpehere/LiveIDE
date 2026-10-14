@@ -1,49 +1,45 @@
-# Environment Setup Guide
+# Local setup
 
-## Quick Setup for Development
+Use Node.js 22 and npm. Run `npm ci` and `npm run prisma:generate` after cloning the repository.
 
-1. **Create a `.env.local` file** in the root directory with the following content:
+## Environment configuration
 
-```env
-# Database (recommended)
-DATABASE_URL="mongodb://localhost:27017/liveide"
+Create a private `.env.local` file in the project root. Environment files are ignored by Git and are not supplied with the repository.
 
-# Explicit in-memory mode for local development only. Data is lost on restart.
-# Remove DATABASE_URL and set this to true when intentionally using mock data.
-ENABLE_MOCK_DB="false"
+| Setting | Purpose |
+| --- | --- |
+| `AUTH_SECRET` | A randomly generated authentication secret. |
+| `DATABASE_URL` | Your MongoDB connection URI, including a database name. Use a replica set for transaction support. |
+| `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` | Your GitHub OAuth application credentials, configured together if using GitHub sign-in. |
+| `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` | Your Google OAuth application credentials, configured together if using Google sign-in. |
+| `ENABLE_MOCK_DB` | Set to `true` only for local development without MongoDB. This also enables guest sign-in. Data is held in memory and lost on restart. |
 
-# NextAuth Configuration (required)
-AUTH_SECRET="your-super-secret-auth-key-change-this-in-production"
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="your-super-secret-auth-key-change-this-in-production"
+Generate a secret locally with:
 
-# OAuth Providers (optional for now)
-# AUTH_GOOGLE_ID=""
-# AUTH_GOOGLE_SECRET=""
-# AUTH_GITHUB_ID=""
-# AUTH_GITHUB_SECRET=""
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-2. Configure at least one OAuth provider before testing sign-in.
+Configure an OAuth provider for sign-in when using MongoDB. With a database configured, apply the Prisma schema using `npm run db:push`. Start the app with `npm run dev` and open [localhost:3000](http://localhost:3000).
 
-3. To intentionally run without MongoDB, set `ENABLE_MOCK_DB="true"` in development. Mock mode is rejected in production.
+## Optional collaboration
 
-## What's Fixed
+Set `NEXT_PUBLIC_COLLABORATION_URL` to `ws://localhost:1234` and generate an independent `COLLABORATION_SECRET`. The application and collaboration service must receive the same collaboration secret. Restart the application after changing settings.
 
-✅ **Starter Templates**: All framework templates are now available
-✅ **Mock Database**: No more database connection errors
-✅ **Template Loading**: The 500 error should be resolved
-✅ **React 19 Compatibility**: Dependencies updated
+With the application running, start the collaboration service in a separate terminal:
 
-## Testing the Playground
+```bash
+node --env-file=.env.local scripts/collaboration-server.mjs
+```
 
-1. Start the development server: `npm run dev`
-2. Open a project from the dashboard, or create one from a starter template.
-3. The template should now load without the 500 error
+For multiple collaboration instances, an optional `REDIS_URL` enables the Redis relay.
 
-## Next Steps
+## Optional AI
 
-- MongoDB-backed playgrounds persist across restarts.
-- Mock playgrounds are stored in memory and are development-only.
-- For databases created before native JSON storage, run `npm run db:migrate-template-content` once.
-- After schema changes, apply indexes and defaults with `npm run db:push`.
+Set `AI_ENABLED` to `true`, choose `AI_PROVIDER`, and configure `AI_PROVIDER_URL` and `AI_MODEL` for your provider. AI remains disabled until enabled and configured.
+
+## Production configuration
+
+Use your deployment platform's secret settings for credentials. Disable mock and collaboration test modes, use independent random secrets of at least 32 characters, and configure real OAuth providers and MongoDB. Production collaboration requires a secure `wss://` URL and an HTTPS `COLLABORATION_APP_URL`. The public collaboration URL is embedded at build time, so changes require a rebuild.
+
+Keep credentials and local environment files out of Git.
